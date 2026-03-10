@@ -285,6 +285,7 @@ client request
 - policy denial
 - export event
 - review queue lag
+- approval_to_projection_freshness_p99
 
 ### 7.2 Observer Health and Gap Detection
 

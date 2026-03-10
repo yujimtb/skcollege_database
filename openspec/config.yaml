@@ -1,0 +1,41 @@
+schema: spec-driven
+
+context: |
+  Project: DOKP (Dormitory Observation & Knowledge Platform)
+  Domain: 学生寮データ統合基盤 & 学術的知識資産プラットフォーム
+
+  Architecture: Functional Core / Imperative Shell
+  Layers: Domain Kernel → Policy → Effect Ports → Adapters → Runtime
+
+  Tech stack (MVP): Python, FastAPI, DuckDB, Parquet, SQLite, MinIO/LocalFS
+  Testing: pytest, contract tests, replay tests
+  Conventions: append-only Lake, academic-pinned reproducibility, filtering-before-exposure
+
+  System Laws (MUST NOT violate):
+  - Append-Only Law: No destructive update to canonical Observations
+  - Replay Law: Same pinned input → same Projection result
+  - Effect Isolation Law: Domain interpretation has no hidden mutable state
+  - Explicit Authority Law: All writes justified by authority model
+  - No Direct Mutation Law: Never update Projection materialization as ground truth
+  - Filtering-before-Exposure Law: Restricted data filtered before display/export
+
+  Modular specs: See openspec/specs/_index.md for module map
+  Agent roles: spec-designer, implementer, reviewer (see agents/)
+
+  MVP scope: Google Slides + Slack → 名寄せ → 個人ページ (vertical slice)
+
+rules:
+  proposal:
+    - Keep proposals under 500 words
+    - Always include Non-goals section
+    - Reference the relevant module spec from openspec/specs/
+    - State which System Laws are affected
+  tasks:
+    - Break tasks into chunks of max 2 hours (half-day ceiling)
+    - Each task must reference its module spec
+    - Include acceptance test criteria
+    - Specify which agent role owns the task
+  spec:
+    - Reference parent module spec and dependencies
+    - Include invariants from domain-kernel spec
+    - Define failure modes per domain_algebra failure taxonomy

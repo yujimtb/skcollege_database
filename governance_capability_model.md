@@ -117,6 +117,18 @@ DOKP の既定は、person-related experimental use を upfront opt-in ではな
 - experiment approval 時: 年度末 opt-out 確認と filtering basis の固定を必須化
 - serve/export 時: filtering projection を必須化
 
+### 3.5 Identity Resolution Confidence Thresholds
+
+| Confidence | Materialization rule | Operational projection | Academic / published projection | Review |
+|---|---|---|---|---|
+| **High** | `resolved_persons` へ自動昇格可 | filtering 後に利用可 | filtering basis 固定後に利用可 | 追加 review 不要 |
+| **Medium** | `resolution_candidates` に留める | reviewer が承認した場合のみ `resolved_persons` へ昇格 | **自動利用禁止** | manual review 必須 |
+| **Low** | candidate のまま保持 | merge 不可 | 利用禁止 | 必要時のみ調査 |
+
+補足:
+- `resolution_candidates.status = pending` の行は published/shared Projection に入力してはならない
+- Medium confidence を `resolved_persons` に昇格させる操作は approval trace に残す
+
 ---
 
 ## 4. Role and Capability Matrix
@@ -170,9 +182,17 @@ Lake 直接編集や unrestricted raw browse は避けます。
 |---|---|---|
 | **Canonical** | LakeAuthoritative | managed projection or human-approved route |
 | **Canonical** | SourceAuthoritative | stable anchor + base revision + approval |
-| **Canonical** | DualReference | per-source rule required |
+| **Canonical** | DualReference | precedence matrix required |
 | **Annotation** | Any | scoped self-service allowed |
 | **Proposal** | Any | default allowed, publication blocked until review |
+
+### 5.1.1 DualReference Evaluation Precedence
+
+| Condition | Effect plan | Rationale |
+|---|---|---|
+| stable source anchor あり + `baseRevision` あり + lossless inverse 可能 | `InvokeSourceNative` | live authority と整合 |
+| source-native へ戻す必然はない + correction/retraction を Lake append で lossless に表現できる | `AppendCanonical` | append-only replay を保持 |
+| stable anchor 不明 / inverse が曖昧 / destructive effect あり | `SubmitReview` | 自動 route 禁止 |
 
 ### 5.2 Mandatory Review Triggers
 
@@ -185,6 +205,7 @@ Lake 直接編集や unrestricted raw browse は避けます。
 - source-native write with destructive effect
 - canonical write without stable anchor
 - conflict resolution after stale base revision
+- medium-confidence identity candidate の published/shared projection への昇格
 
 ### 5.3 Approval Trace
 
@@ -199,6 +220,12 @@ approval では少なくとも次を残します。
 - generated effect plan
 - final execution result
 - timestamp
+
+### 5.4 Write Approval SLA
+
+- approval 完了済みの canonical / source-native write は、`operational-latest` read で **60 秒以内** に観測可能でなければならない
+- poll-based propagation を使う場合、対象 Projection の poll interval は `<= 30s`
+- 監視メトリクスとして `approval_to_projection_freshness_p99` を持つ
 
 ---
 
@@ -279,6 +306,17 @@ Consent 撤回時の処理フロー:
 | **Projection** | materialized views | filtering projection で当該 subject を除外 |
 
 Supplemental 上の record は `derivedFrom` で元 Observation を参照しているため、retracted Observation に紐づく supplemental を自動的に特定できます。Projection build 時に filtering projection がこの情報を使い、opt-out 対象の supplemental 由来データを exposure から除外します。
+
+最低限残す metadata 例:
+
+```text
+ConsentMetadata =
+  { referencedObservationId
+  , retractedAt?
+  , optOutStrategy
+  , optOutEffectiveAt?
+  }
+```
 
 ### 7.5 Takedown Ladder
 

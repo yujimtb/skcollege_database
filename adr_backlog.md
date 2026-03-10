@@ -44,19 +44,19 @@
 
 ## ADR-004 Identity Resolution Placement
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** 名寄せを Lake に入れると canonical truth が解釈依存になりやすい。
-- **Current direction:** identity resolution は Projection 寄りとし、必要なら supplemental に候補や補助記録を置く。
+- **Current direction:** identity resolution は Projection 寄りとし、Medium / Low は candidate queue に留め、承認済み結果のみを resolved identity view に昇格する。
 - **User signal:** 名寄せは基本 Projection の領域。補助情報領域に限定的に置くのは可。
-- **Next decision:** `same-as` 系を canonical event にするか、resolved identity view に留めるかを決める。
+- **Next decision:** OpenSpec M12 / M13 / M08 に反映済み。merge 後は candidate 承認 API の実装へ進む。
 
 ## ADR-005 Trust / Confidence Placement
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** trust/confidence を canonical payload に入れると source truth と解釈が混ざる。
-- **Current direction:** confidence や verification は Projection または supplemental に置く。
+- **Current direction:** confidence や verification は Projection または supplemental に置き、Medium confidence は review を経ない限り published/shared Projection に入れない。
 - **User signal:** Lake には入れず、必要なら補助情報領域に載せるのがよい。
-- **Next decision:** confidence を離散ラベルにするか、review state にするかを決める。
+- **Next decision:** governance_capability_model.md §3.5 と identity spec に反映済み。merge 後は acceptance test 実装へ進む。
 
 ## ADR-006 Consent Granularity and Filtering Projections
 
@@ -92,11 +92,11 @@
 
 ## ADR-010 Schema Openness and Source Contract Evolution
 
-- **Status:** Active
+- **Status:** Ready to Merge
 - **Why it matters:** open registry を保ちながら source 進化への追従方法を定義する必要がある。
-- **Current direction:** entity/schema の自由追加よりも、既存 source contract の拡張・変更への対応が中心課題。
+- **Current direction:** adapter version と schema version を binding table で結び、schema major bump には adapter major bump または新 observer contract を要求する。
 - **User signal:** Lake へ直接入れるより、source capability の拡張が新 schema 登録の契機になる。
-- **Next decision:** source adapter version と schema version の関係を ADR 化する。
+- **Next decision:** registry.md / adapter-policy.md に binding rule を反映済み。adapter 別の concrete example を実装 task で補う。
 
 ## ADR-011 Time Model
 
@@ -155,11 +155,11 @@
 
 ## ADR-016 Concurrency and Conflict Resolution Protocol
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** Writable Projection での同時書き込みと source-native write-back の競合解決を定義する必要がある。
-- **Current direction:** 楽観的ロック（OCC）を標準とし、`visibleRowHash` / `baseRevision` で競合検知する。自動 rebase は annotation mode に限定。
+- **Current direction:** 楽観的ロック（OCC）を標準とし、`visibleRowHash` / `baseRevision` で競合検知する。DualReference は stable anchor / lossless inverse / destructive effect の precedence matrix で route を確定する。
 - **User signal:** 提案の方向性で合意。仕様化済み。
-- **Next decision:** domain_algebra.md §6.6 に反映済み。具体的な merge strategy の例を追加する。
+- **Next decision:** domain_algebra.md §6.4 と write-back.md に反映済み。adapter 別 implementation example を追加したら archive 候補。
 
 ## ADR-017 Observer Health and Gap Detection
 
@@ -171,11 +171,11 @@
 
 ## ADR-018 DAG Change Propagation Mechanism
 
-- **Status:** Active
+- **Status:** Ready to Merge
 - **Why it matters:** Projection DAG の伝播戦略が未定義だと、データ増加時のスケーラビリティと freshness が保証できない。
-- **Current direction:** incremental propagation（差分伝播）を第一優先とし、scheduled rebuild を第二優先、lazy invalidate は原則非推奨。
+- **Current direction:** incremental propagation（差分伝播）を第一優先とし、watermark に supplemental version pin を保持する。approved write は approval SLA に従って freshness を監視する。
 - **User signal:** 全データ rebuild ではなく更新 record のみの propagation を優先したい。全データ集計型 Projection は設計段階で rebuild コストを考慮する必要がある。
-- **Next decision:** plan.md §5.2.1 に方針反映済み。incremental apply の具体的な watermark 管理と DAG scheduler の実装例を用意する。
+- **Next decision:** dag-propagation.md に watermark / SLA ルールを反映済み。runtime metric wiring を実装 task で固める。
 
 ## ADR-019 MVP End-to-End Scenario
 
@@ -187,27 +187,27 @@
 
 ## ADR-020 Supplemental Mutability Policy
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** Supplemental record の AppendOnly / ManagedCache の判定基準を明確にし、academic-pinned の determinism を保証する。
-- **Current direction:** 既定は AppendOnly。判定表を domain_algebra.md §4.4 に定義済み。academic-pinned が参照する場合は version-pinned read を必須とする。
+- **Current direction:** 既定は AppendOnly。判定表を domain_algebra.md §4.4 に定義済み。academic-pinned が参照する場合は version-pinned read を必須とし、recordVersion を契約に含める。
 - **User signal:** 提案の方向性で合意。
-- **Next decision:** domain_algebra.md §4.4 に反映済み。Ready to Merge 候補。
+- **Next decision:** supplemental-store.md に recordVersion / consentMetadata 契約を反映済み。merge 後は API 実装へ進む。
 
 ## ADR-021 Source-Native Read Contract
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** source-native を直接読む Projection の lineage 表現とフォールバック動作を明確にする。
-- **Current direction:** AcademicPinned では禁止、OperationalLatest では許可、ApplicationCached では cache 優先。fallback ladder と lineage capture 方式を定義。
+- **Current direction:** AcademicPinned では禁止、OperationalLatest では許可、ApplicationCached では cache 優先。fallback ladder に加え、Lake 併用時は reconciliation policy を必須にする。
 - **User signal:** 提案の方向性で合意。
-- **Next decision:** domain_algebra.md §5.5 に反映済み。Ready to Merge 候補。
+- **Next decision:** domain_algebra.md §5.5 と projection-engine.md に反映済み。adapter 例を追加したら archive 候補。
 
 ## ADR-022 Consent Cascade to Supplemental
 
-- **Status:** Agreed Direction
+- **Status:** Ready to Merge
 - **Why it matters:** consent 撤回時に supplemental derivation をどう扱うかの方針が必要。
-- **Current direction:** supplemental record は削除せず保持し、filtering projection で exposure から除外する。削除すると opt-out 判断の根拠が失われるため。
+- **Current direction:** supplemental record は削除せず保持し、`ConsentMetadata` を更新して filtering projection で exposure から除外する。削除すると opt-out 判断の根拠が失われるため。
 - **User signal:** filtering projection での除外がクリーン。
-- **Next decision:** governance_capability_model.md §7.4 に反映済み。Ready to Merge 候補。
+- **Next decision:** governance_capability_model.md §7.4 と supplemental-store.md に反映済み。merge 後は filtering query 実装へ進む。
 
 ---
 
