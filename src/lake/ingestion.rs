@@ -1,0 +1,376 @@
+//! M03 Observation Lake — Ingestion Gate
+//!
+//! The pipeline that validates, deduplicates, and appends observations.
+//! Enforces: L1 (Append-Only), L4 (Explicit Authority), L8 (Idempotency),
+//! L11 (Temporal Ordering).
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::domain::{
+    AuthorityModel, BlobRef, CaptureModel, EntityRef, IdempotencyKey,
+    IngestResult, Observation, ObserverRef, QuarantineTicket, SchemaRef,
+    SemVer, SourceSystemRef, MAX_CLOCK_SKEW,
+};
+use crate::registry::RegistryStore;
+
+use super::blob::BlobStore;
+use super::store::LakeStore;
+
+/// Client-facing request to ingest an observation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestRequest {
+    pub schema: SchemaRef,
+    pub schema_version: SemVer,
+    pub observer: ObserverRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_system: Option<SourceSystemRef>,
+    pub authority_model: AuthorityModel,
+    pub capture_model: CaptureModel,
+    pub subject: EntityRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<EntityRef>,
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub attachments: Vec<BlobRef>,
+    pub published: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<IdempotencyKey>,
+    #[serde(default)]
+    pub meta: serde_json::Value,
+}
+
+/// The Ingestion Gate coordinates validation → dedup → append.
+pub struct IngestionGate<'a> {
+    pub registry: &'a RegistryStore,
+    pub lake: &'a mut LakeStore,
+    pub blobs: &'a BlobStore,
+}
+
+impl IngestionGate<'_> {
+    /// Run the full ingestion pipeline (steps 1–9 from the spec).
+    pub fn ingest(&mut self, req: IngestRequest) -> IngestResult {
+        let recorded_at = Utc::now();
+
+        // Step 1: Authenticate observer (must be registered).
+        if self.registry.get_observer(&req.observer).is_none() {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!("Observer {} not registered", req.observer),
+            };
+        }
+
+        // Step 2: Resolve source contract — verify schema exists.
+        if self.registry.get_schema(&req.schema).is_none() {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!("Schema {} not registered", req.schema),
+            };
+        }
+
+        // Step 3: Validate payload (JSON Schema).
+        // For MVP we only check that payload is a JSON object.
+        if !req.payload.is_object() {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: "Payload must be a JSON object".into(),
+            };
+        }
+
+        // Step 4: Governance policy — placeholder (M08 Governance).
+        // MVP: always Allow.
+
+        // Step 5: Idempotency check is handled by LakeStore.append().
+
+        // Step 6: Verify blob refs exist (if any).
+        for br in &req.attachments {
+            if !self.blobs.contains(br) {
+                return IngestResult::Rejected {
+                    class: crate::domain::FailureClass::ValidationFailure,
+                    message: format!("Blob {} not found in blob store", br),
+                };
+            }
+        }
+
+        // Step 7 & 8: Temporal validation (L11).
+        if req.published > recorded_at + MAX_CLOCK_SKEW {
+            return IngestResult::Quarantined {
+                ticket: QuarantineTicket {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    reason: format!(
+                        "published ({}) is too far in the future vs recordedAt ({})",
+                        req.published, recorded_at
+                    ),
+                },
+            };
+        }
+
+        // Step 9: Build Observation and append.
+        let obs = Observation {
+            id: Observation::new_id(),
+            schema: req.schema,
+            schema_version: req.schema_version,
+            observer: req.observer,
+            source_system: req.source_system,
+            actor: None,
+            authority_model: req.authority_model,
+            capture_model: req.capture_model,
+            subject: req.subject,
+            target: req.target,
+            payload: req.payload,
+            attachments: req.attachments,
+            published: req.published,
+            recorded_at,
+            consent: None,
+            idempotency_key: req.idempotency_key,
+            meta: req.meta,
+        };
+
+        match self.lake.append(obs) {
+            Ok(id) => IngestResult::Ingested { id, recorded_at },
+            Err(existing_id) => IngestResult::Duplicate { existing_id },
+        }
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::*;
+    use crate::registry::*;
+
+    /// Helper: build a registry with Slack source + observer + schema.
+    fn setup_registry() -> RegistryStore {
+        let mut reg = RegistryStore::new();
+        reg.register_source_system(SourceSystem {
+            id: SourceSystemRef::new("sys:slack"),
+            name: "Slack".into(),
+            provider: Some("Slack".into()),
+            api_version: Some("v1".into()),
+            source_class: SourceClass::MutableText,
+        })
+        .unwrap();
+        reg.register_observer(Observer {
+            id: ObserverRef::new("obs:slack-crawler"),
+            name: "Slack Crawler".into(),
+            observer_type: ObserverType::Crawler,
+            source_system: SourceSystemRef::new("sys:slack"),
+            adapter_version: SemVer::new("1.0.0"),
+            schemas: vec![SchemaRef::new("schema:slack-message")],
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            owner: "dokp".into(),
+            trust_level: TrustLevel::Automated,
+        })
+        .unwrap();
+        reg.register_schema(ObservationSchema {
+            id: SchemaRef::new("schema:slack-message"),
+            name: "Slack Message".into(),
+            version: SemVer::new("1.0.0"),
+            subject_type: EntityTypeRef::new("et:message"),
+            target_type: None,
+            payload_schema: serde_json::json!({"type": "object"}),
+            source_contracts: vec![],
+            attachment_config: None,
+            registered_by: None,
+            registered_at: None,
+        })
+        .unwrap();
+        reg
+    }
+
+    fn valid_request() -> IngestRequest {
+        IngestRequest {
+            schema: SchemaRef::new("schema:slack-message"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:slack-crawler"),
+            source_system: Some(SourceSystemRef::new("sys:slack")),
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            subject: EntityRef::new("message:slack:C01-999"),
+            target: None,
+            payload: serde_json::json!({"text": "hello"}),
+            attachments: vec![],
+            published: Utc::now(),
+            idempotency_key: Some(IdempotencyKey::new("slack:C01:999")),
+            meta: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn valid_observation_ingested() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let result = gate.ingest(valid_request());
+        assert!(matches!(result, IngestResult::Ingested { .. }));
+        assert_eq!(lake.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_idempotency_key_returns_duplicate() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+        gate.ingest(valid_request());
+
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+        let result = gate.ingest(valid_request());
+        assert!(matches!(result, IngestResult::Duplicate { .. }));
+        assert_eq!(lake.len(), 1);
+    }
+
+    #[test]
+    fn unregistered_observer_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.observer = ObserverRef::new("obs:unknown");
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn unregistered_schema_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.schema = SchemaRef::new("schema:nonexistent");
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn invalid_payload_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.payload = serde_json::json!("not an object");
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn future_published_quarantined() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.published = Utc::now() + chrono::TimeDelta::hours(1);
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Quarantined { .. }));
+    }
+
+    #[test]
+    fn missing_blob_ref_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.attachments = vec![BlobRef::new("blob:sha256:0000")];
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn blob_ref_present_accepted() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let mut blobs = BlobStore::new();
+        let blob_ref = blobs.put(b"attachment data");
+
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.attachments = vec![blob_ref];
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Ingested { .. }));
+    }
+
+    #[test]
+    fn watermark_and_since_incremental() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+
+        // Ingest first.
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+        gate.ingest(valid_request());
+
+        let wm = lake.watermark().unwrap();
+
+        // Ingest second with different key.
+        let mut req2 = valid_request();
+        req2.idempotency_key = Some(IdempotencyKey::new("slack:C01:1000"));
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+        gate.ingest(req2);
+
+        let delta = lake.since(wm.position);
+        assert_eq!(delta.len(), 1);
+    }
+}

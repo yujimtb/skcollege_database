@@ -1301,6 +1301,8 @@ Year N → N+1 引き継ぎ:
 守るべき semantic contract は Sections 0-10, 12-13 と、[domain_algebra.md](domain_algebra.md) / [governance_capability_model.md](governance_capability_model.md) に置く。  
 **技術スタックの詳細、runtime topology、sandbox 構成、operational controls** は [runtime_reference_architecture.md](runtime_reference_architecture.md) を参照。
 
+> **Implementation note:** この章の技術マッピングは reference であり、現行リポジトリの実装言語やライブラリ構成を拘束しない。現在の実装は Rust crate 上で MVP の semantic kernel、adapter pipeline、projection pipeline を検証している。
+
 ### 11.1 Full Stack (推奨構成)
 
 | Component | Technology | Rationale |
@@ -1409,6 +1411,8 @@ Step 6: 検証
 ---
 
 ## 12. Write Paths: Lake-Mediated and Source-Native
+
+> **Implementation note:** `openspec/specs/write-back.md` にある通り、Write-Back (M07) は MVP 外であり、このリポジトリの現行実装には write router / write adapter は含まれない。本章と §13 は target semantics と post-MVP design contract を示す。
 
 Projection 上の UI やアプリケーションからの変更は、**Projection に直接書き込まない**。ただし、書き込み先は 1 つではなく、次の 2 系統を持つ。
 
