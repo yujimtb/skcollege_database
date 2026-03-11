@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 
-use crate::domain::{EntityRef, Observation, SchemaRef};
+use crate::domain::{EntityRef, Observation, ObservationId, SchemaRef, SupplementalRecord};
 use crate::identity::types::{IdentifierType, IdentityResolutionOutput, ResolvedPerson};
+use crate::slide_analysis::types::StudentProfile;
 
 use super::types::*;
 
@@ -22,6 +23,7 @@ impl PersonPageProjector {
     pub fn project(
         identity: &IdentityResolutionOutput,
         observations: &[Observation],
+        supplemental_records: &[&SupplementalRecord],
     ) -> PersonPageOutput {
         let mut profiles = Vec::new();
         let mut all_slides = Vec::new();
@@ -30,19 +32,36 @@ impl PersonPageProjector {
 
         // Build person-id → identifiers map for matching.
         let person_identifiers = Self::build_person_identifier_map(identity);
+        let frontend_profiles = Self::build_frontend_profile_map(
+            observations,
+            supplemental_records,
+            &person_identifiers,
+        );
 
         for person in &identity.resolved_persons {
             let (slides, messages) =
                 Self::collect_related(person, observations, &person_identifiers);
 
             let activity = Self::build_activity(&person.person_id, &slides, &messages);
+            let frontend_profile = frontend_profiles.get(person.person_id.as_str()).cloned();
 
             let profile = PersonProfile {
                 person_id: person.person_id.clone(),
                 display_name: person.canonical_name.clone(),
-                self_intro_text: None, // Populated from supplemental in real pipeline.
-                self_intro_slide_id: None,
-                self_intro_thumbnail: None,
+                self_intro_text: frontend_profile
+                    .as_ref()
+                    .and_then(|profile| profile.profile.bio_text.clone()),
+                self_intro_slide_id: frontend_profile
+                    .as_ref()
+                    .map(|profile| profile.source_document_id.clone()),
+                self_intro_thumbnail: frontend_profile
+                    .as_ref()
+                    .and_then(|profile| {
+                        profile
+                            .thumbnail_url
+                            .clone()
+                            .or_else(|| profile.thumbnail_ref.clone())
+                    }),
                 identities: person
                     .identifiers
                     .iter()
@@ -61,6 +80,7 @@ impl PersonPageProjector {
                 source_count: person.sources.len(),
                 last_activity: activity.last_activity,
                 profile_updated_at: Utc::now(),
+                frontend_profile,
             };
 
             profiles.push(profile);
@@ -75,6 +95,116 @@ impl PersonPageProjector {
             messages: all_messages,
             activities: all_activities,
         }
+    }
+
+    fn build_frontend_profile_map(
+        observations: &[Observation],
+        supplemental_records: &[&SupplementalRecord],
+        identifier_map: &HashMap<String, EntityRef>,
+    ) -> HashMap<String, FrontendProfile> {
+        let observation_index: HashMap<ObservationId, &Observation> = observations
+            .iter()
+            .map(|observation| (observation.id.clone(), observation))
+            .collect();
+        let mut results: HashMap<String, (chrono::DateTime<chrono::Utc>, FrontendProfile)> = HashMap::new();
+
+        for record in supplemental_records {
+            if record.kind != "slide-analysis" {
+                continue;
+            }
+
+            let profile = match serde_json::from_value::<StudentProfile>(record.payload.clone()) {
+                Ok(profile) => profile,
+                Err(_) => continue,
+            };
+            if profile.companion_to_slide_object_id.is_some() {
+                continue;
+            }
+            let source_observation = record
+                .derived_from
+                .observations
+                .first()
+                .and_then(|id| observation_index.get(id))
+                .copied();
+            let Some(source_observation) = source_observation else {
+                continue;
+            };
+
+            let person_id = profile
+                .email
+                .as_deref()
+                .or(profile.generated_email.as_deref())
+                .and_then(|value| identifier_map.get(value))
+                .cloned()
+                .or_else(|| {
+                    profile
+                        .source_document_id
+                        .as_deref()
+                        .and_then(|value| identifier_map.get(value))
+                        .cloned()
+                })
+                .or_else(|| Self::person_id_from_slide_observation(source_observation, identifier_map));
+            let Some(person_id) = person_id else {
+                continue;
+            };
+
+            let frontend_profile = FrontendProfile {
+                source_document_id: profile
+                    .source_document_id
+                    .clone()
+                    .unwrap_or_else(|| source_observation.subject.as_str().to_string()),
+                source_canonical_uri: profile
+                    .source_canonical_uri
+                    .clone()
+                    .or_else(|| {
+                        source_observation
+                            .payload
+                            .pointer("/artifact/canonicalUri")
+                            .and_then(|value| value.as_str())
+                            .map(ToOwned::to_owned)
+                    }),
+                thumbnail_ref: profile
+                    .thumbnail_blob_ref
+                    .clone()
+                    .or_else(|| record.derived_from.blobs.first().map(|blob| blob.as_str().to_string())),
+                thumbnail_url: profile.thumbnail_url.clone(),
+                profile,
+            };
+
+            let created_at = record.created_at;
+            match results.get(person_id.as_str()) {
+                Some((current_created_at, _)) if *current_created_at >= created_at => {}
+                _ => {
+                    results.insert(person_id.as_str().to_string(), (created_at, frontend_profile));
+                }
+            }
+        }
+
+        results
+            .into_iter()
+            .map(|(person_id, (_, profile))| (person_id, profile))
+            .collect()
+    }
+
+    fn person_id_from_slide_observation(
+        observation: &Observation,
+        identifier_map: &HashMap<String, EntityRef>,
+    ) -> Option<EntityRef> {
+        observation
+            .payload
+            .pointer("/relations/owner")
+            .and_then(|value| value.as_str())
+            .and_then(|owner| identifier_map.get(owner))
+            .cloned()
+            .or_else(|| {
+                observation
+                    .payload
+                    .pointer("/relations/editors")
+                    .and_then(|value| value.as_array())
+                    .and_then(|editors| editors.iter().find_map(|editor| editor.as_str()))
+                    .and_then(|email| identifier_map.get(email))
+                    .cloned()
+            })
     }
 
     /// Build a map from source identifier values to person_id.
@@ -132,6 +262,38 @@ impl PersonPageProjector {
                     thumbnail_ref: None,
                     last_modified: Some(obs.published),
                 });
+            } else if obs.schema == SchemaRef::new("schema:slide-analysis-result") {
+                slide_counter += 1;
+                slides.push(PersonSlide {
+                    id: format!("ps:{}:{slide_counter}", person.person_id),
+                    person_id: person.person_id.clone(),
+                    document_id: obs
+                        .target
+                        .as_ref()
+                        .map(|target| target.as_str().to_string())
+                        .unwrap_or_else(|| obs.subject.as_str().to_string()),
+                    title: obs
+                        .payload
+                        .get("person_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Analyzed Slide")
+                        .to_string(),
+                    role: "self-intro".into(),
+                    last_seen_revision: None,
+                    slide_count: Some(1),
+                    thumbnail_ref: obs
+                        .payload
+                        .get("thumbnail_url")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                        .or_else(|| {
+                            obs.payload
+                                .get("thumbnail_blob_ref")
+                                .and_then(|v| v.as_str())
+                                .map(ToOwned::to_owned)
+                        }),
+                    last_modified: Some(obs.published),
+                });
             } else if obs.schema == SchemaRef::new("schema:slack-message") {
                 msg_counter += 1;
                 let text = obs
@@ -184,6 +346,14 @@ impl PersonPageProjector {
 
         // Check via email in payload.
         if let Some(email) = obs.payload.get("email").and_then(|v| v.as_str()) {
+            if let Some(pid) = identifier_map.get(email) {
+                if *pid == person.person_id {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(email) = obs.payload.get("person_email").and_then(|v| v.as_str()) {
             if let Some(pid) = identifier_map.get(email) {
                 if *pid == person.person_id {
                     return true;
@@ -398,7 +568,7 @@ mod tests {
             gslides_obs(&["tanaka@example.jp"], "tanaka@example.jp", "g1"),
         ];
 
-        let output = PersonPageProjector::project(&identity, &observations);
+        let output = PersonPageProjector::project(&identity, &observations, &[]);
         assert_eq!(output.profiles.len(), 1);
         assert_eq!(output.profiles[0].display_name, "田中太郎");
         assert_eq!(output.messages.len(), 2);
@@ -416,7 +586,7 @@ mod tests {
             slack_obs("U999", "other@example.com", "unrelated", "general", "s1"),
         ];
 
-        let output = PersonPageProjector::project(&identity, &observations);
+        let output = PersonPageProjector::project(&identity, &observations, &[]);
         assert_eq!(output.messages.len(), 0);
     }
 
@@ -427,7 +597,7 @@ mod tests {
             slack_obs("U123", "tanaka@example.jp", "hello", "general", "s1"),
         ];
 
-        let output = PersonPageProjector::project(&identity, &observations);
+        let output = PersonPageProjector::project(&identity, &observations, &[]);
         let profile = &output.profiles[0];
         let activity = &output.activities[0];
         let msgs: Vec<_> = output.messages.iter().filter(|m| m.person_id == profile.person_id).collect();
@@ -451,7 +621,7 @@ mod tests {
             gslides_obs(&["tanaka@example.jp"], "tanaka@example.jp", "g1"),
         ];
 
-        let output = PersonPageProjector::project(&identity, &observations);
+        let output = PersonPageProjector::project(&identity, &observations, &[]);
         let item = PersonPageProjector::to_list_item(&output.profiles[0], &output.activities[0]);
         assert_eq!(item.display_name, "田中太郎");
         assert_eq!(item.total_messages, 1);
@@ -467,8 +637,8 @@ mod tests {
             gslides_obs(&["tanaka@example.jp"], "tanaka@example.jp", "g1"),
         ];
 
-        let r1 = PersonPageProjector::project(&identity, &observations);
-        let r2 = PersonPageProjector::project(&identity, &observations);
+        let r1 = PersonPageProjector::project(&identity, &observations, &[]);
+        let r2 = PersonPageProjector::project(&identity, &observations, &[]);
         assert_eq!(r1.profiles.len(), r2.profiles.len());
         assert_eq!(r1.messages.len(), r2.messages.len());
         assert_eq!(r1.slides.len(), r2.slides.len());

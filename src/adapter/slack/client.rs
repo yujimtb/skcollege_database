@@ -18,6 +18,8 @@ pub struct SlackMessage {
     pub thread_ts: Option<String>,
     pub user_id: String,
     pub user_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub text: String,
     pub message_type: SlackMessageType,
     #[serde(skip_serializing_if = "Option::is_none")]

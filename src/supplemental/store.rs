@@ -40,6 +40,56 @@ impl SupplementalStore {
         record: SupplementalRecord,
         lake: &LakeStore,
     ) -> Result<SupplementalId, DomainError> {
+        self.validate_record(&record, lake)?;
+
+        if self.records.contains_key(&record.id.0) {
+            return Err(DomainError::Conflict(format!(
+                "Supplemental record {} already exists",
+                record.id
+            )));
+        }
+
+        let id = record.id.clone();
+        let ver = VersionedRecord {
+            version: 1,
+            record,
+        };
+        self.history.push(ver.clone());
+        self.records.insert(id.0.clone(), ver);
+        Ok(id)
+    }
+
+    pub fn upsert(
+        &mut self,
+        mut record: SupplementalRecord,
+        lake: &LakeStore,
+    ) -> Result<SupplementalId, DomainError> {
+        self.validate_record(&record, lake)?;
+
+        if let Some(entry) = self.records.get_mut(&record.id.0) {
+            if entry.record.mutability == Mutability::AppendOnly {
+                return Err(DomainError::Policy(crate::domain::PolicyError {
+                    code: "APPEND_ONLY".into(),
+                    message: format!("Record {} is AppendOnly and cannot be overwritten", record.id),
+                }));
+            }
+
+            let new_version = entry.version + 1;
+            record.record_version = Some(new_version.to_string());
+            entry.version = new_version;
+            entry.record = record.clone();
+            self.history.push(entry.clone());
+            return Ok(record.id);
+        }
+
+        self.add(record, lake)
+    }
+
+    fn validate_record(
+        &self,
+        record: &SupplementalRecord,
+        lake: &LakeStore,
+    ) -> Result<(), DomainError> {
         // Invariant 2: derivedFrom must have at least one anchor.
         if record.derived_from.observations.is_empty()
             && record.derived_from.blobs.is_empty()
@@ -60,21 +110,7 @@ impl SupplementalStore {
             }
         }
 
-        if self.records.contains_key(&record.id.0) {
-            return Err(DomainError::Conflict(format!(
-                "Supplemental record {} already exists",
-                record.id
-            )));
-        }
-
-        let id = record.id.clone();
-        let ver = VersionedRecord {
-            version: 1,
-            record,
-        };
-        self.history.push(ver.clone());
-        self.records.insert(id.0.clone(), ver);
-        Ok(id)
+        Ok(())
     }
 
     /// Overwrite a ManagedCache record.  AppendOnly records will be rejected.

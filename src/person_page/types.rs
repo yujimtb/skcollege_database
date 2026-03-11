@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::EntityRef;
+use crate::slide_analysis::types::StudentProfile;
 
 /// Person profile (person_profiles table, M13 §3.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,20 @@ pub struct PersonProfile {
     pub source_count: usize,
     pub last_activity: Option<DateTime<Utc>>,
     pub profile_updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub frontend_profile: Option<FrontendProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontendProfile {
+    pub source_document_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_canonical_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    pub profile: StudentProfile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +158,7 @@ mod tests {
             source_count: 1,
             last_activity: None,
             profile_updated_at: Utc::now(),
+            frontend_profile: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         assert!(json.contains("person:test-1"));

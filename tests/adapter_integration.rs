@@ -229,6 +229,7 @@ fn sample_slack_message() -> SlackMessage {
         thread_ts: None,
         user_id: "U01XYZ".into(),
         user_name: "tanaka".into(),
+        email: Some("tanaka@example.jp".into()),
         text: "Hello everyone!".into(),
         message_type: SlackMessageType::Message,
         edited: None,
@@ -449,6 +450,7 @@ fn gslides_revision_ingested_through_gate() {
         title: "寮紹介スライド".into(),
         container_id: Some("folder789".into()),
         canonical_uri: "https://docs.google.com/presentation/d/pres123".into(),
+        owner: Some("owner@example.com".into()),
         editors: vec!["editor@example.com".into()],
         viewers: vec![],
     };
@@ -489,6 +491,7 @@ fn gslides_duplicate_revision_deduplicated() {
         title: "Test".into(),
         container_id: None,
         canonical_uri: "https://docs.google.com/presentation/d/pres123".into(),
+        owner: None,
         editors: vec![],
         viewers: vec![],
     };
@@ -533,6 +536,7 @@ fn gslides_with_blob_attachments() {
         title: "Test".into(),
         container_id: None,
         canonical_uri: "https://docs.google.com/presentation/d/pres123".into(),
+        owner: None,
         editors: vec![],
         viewers: vec![],
     };
@@ -616,6 +620,7 @@ fn revision_snapshot_vs_event_capture_typed() {
         title: "T".into(),
         container_id: None,
         canonical_uri: "https://docs.google.com/presentation/d/p1".into(),
+        owner: None,
         editors: vec![],
         viewers: vec![],
     };

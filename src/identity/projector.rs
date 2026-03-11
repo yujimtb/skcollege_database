@@ -53,6 +53,11 @@ impl IdentityProjector {
                 "schema:workspace-object-snapshot" => {
                     candidates.extend(Self::extract_gslides_candidates(obs));
                 }
+                "schema:slide-analysis-result" => {
+                    if let Some(candidate) = Self::extract_slide_analysis_candidate(obs) {
+                        candidates.push(candidate);
+                    }
+                }
                 _ => {}
             }
         }
@@ -143,6 +148,54 @@ impl IdentityProjector {
         }
 
         candidates
+    }
+
+    fn extract_slide_analysis_candidate(obs: &Observation) -> Option<PersonCandidate> {
+        let display_name = obs
+            .payload
+            .get("person_name")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+
+        let mut identifiers = Vec::new();
+
+        if let Some(email) = obs
+            .payload
+            .get("person_email")
+            .and_then(|v| v.as_str())
+        {
+            identifiers.push(SourceIdentifier {
+                source: "slide-analysis".into(),
+                identifier_type: IdentifierType::Email,
+                value: email.to_string(),
+            });
+        }
+
+        if let Some(target) = &obs.target {
+            identifiers.push(SourceIdentifier {
+                source: "slide-analysis".into(),
+                identifier_type: IdentifierType::UserId,
+                value: target.as_str().to_string(),
+            });
+        }
+
+        if let Some(name) = &display_name {
+            identifiers.push(SourceIdentifier {
+                source: "slide-analysis".into(),
+                identifier_type: IdentifierType::DisplayName,
+                value: name.clone(),
+            });
+        }
+
+        if identifiers.is_empty() {
+            return None;
+        }
+
+        Some(PersonCandidate {
+            source: "slide-analysis".into(),
+            identifiers,
+            display_name,
+        })
     }
 
     /// Phase 2: Cross-source matching.

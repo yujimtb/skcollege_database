@@ -16,6 +16,7 @@ pub mod traits;
 
 pub mod slack;
 pub mod gslides;
+pub mod writeback;
 
 pub use config::*;
 pub use error::*;

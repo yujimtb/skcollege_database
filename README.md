@@ -57,13 +57,82 @@
 
 - `cargo build`
 - `cargo test`
-- 2026-03-10 時点で unit test 189 件 + integration test 23 件が通過
+- 2026-03-10 時点で self-host binary と API integration test を含めて `cargo test` が通過
 
 ### Current Follow-Ups
 
 - `M07 Write-Back` は仕様化済みだが、現行コードでは `Command` / `EffectPlan` の定義までで、write router や source-native write adapter は未実装
 - `M08 Governance` は最小実装で、`lake::IngestionGate` の policy 呼び出しは今後の接続ポイントとして残っている
 - `M15 Runtime` は local build runner ベースで、container sandbox は Growth 以降の扱い
+
+## Self-Host Quickstart
+
+このリポジトリには、Slack と Google Slides をローカルで取り込み、person page API を返す self-host 用 binary が追加されています。
+
+### Prerequisites
+
+- Rust stable toolchain
+- Slack Bot Token
+- Google Slides / Drive を読める OAuth access token、または `client_id` / `client_secret` / `refresh_token`
+
+### Configuration
+
+1. `.env.example` を参考に `.env` を作る
+2. 最低限、以下を設定する
+
+- `DOKP_SLACK_BOT_TOKEN`
+- `DOKP_SLACK_CHANNEL_IDS`
+- `DOKP_GOOGLE_PRESENTATION_IDS`
+- `DOKP_GOOGLE_ACCESS_TOKEN`
+
+access token を毎回手で入れたくない場合は、代わりに以下を設定します。
+
+- `DOKP_GOOGLE_CLIENT_ID`
+- `DOKP_GOOGLE_CLIENT_SECRET`
+- `DOKP_GOOGLE_REFRESH_TOKEN`
+
+Notion への write-back も確認したい場合は、以下も設定します。
+
+- `DOKP_NOTION_TOKEN`
+- `DOKP_NOTION_DATABASE_ID`
+
+Google Slides の AI 抽出を有効にする場合は、以下も設定します。
+
+- `DOKP_GEMINI_API_KEY`
+- `DOKP_GEMINI_MODEL` (`gemini-2.5-flash` 既定)
+
+Notion database 側には title property が最低限 1 つ必要です。`Email` property は必須ではありませんが、ページ照合の安定性のため強く推奨します。
+
+現在の adapter は、存在する場合に以下の database property も同期します。
+
+- `Birthplace` (rich text)
+- `DoB` (rich text)
+- `Hashtag` (rich text)
+- `Major_Interests` (rich text)
+
+プロフィール本文、画像、ギャラリー、narrative sections は database property ではなく page body block として描画されます。
+
+### Run
+
+```bash
+cargo run --bin dokp-selfhost
+```
+
+起動後の主な endpoint:
+
+- `GET /health`
+- `POST /admin/sync`
+- `GET /api/persons`
+- `GET /api/persons/{person_id}`
+- `GET /api/persons/{person_id}/slides`
+- `GET /api/persons/{person_id}/messages`
+- `GET /api/persons/{person_id}/timeline`
+
+### Notes
+
+- 永続化は SQLite + ローカル blob directory を使います
+- API は internal-only 前提で、現状は簡易構成のため認証を入れていません
+- person detail では `Filtering-before-Exposure` により `identities` を非表示にしています
 
 ## Reading Order
 

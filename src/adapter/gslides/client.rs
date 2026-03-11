@@ -45,6 +45,8 @@ pub struct PresentationMeta {
     pub title: String,
     pub container_id: Option<String>,
     pub canonical_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub editors: Vec<String>,
     pub viewers: Vec<String>,
 }
@@ -55,6 +57,7 @@ pub struct RenderedSlide {
     pub slide_object_id: String,
     pub format: String,
     pub data: Vec<u8>,
+    pub content_url: Option<String>,
 }
 
 /// Paginated revision list from Drive API.

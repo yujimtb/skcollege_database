@@ -93,6 +93,10 @@ impl<C: SlackClient> SlackAdapter<C> {
             "message_type": msg.message_type,
         });
 
+        if let Some(ref email) = msg.email {
+            payload["email"] = serde_json::json!(email);
+        }
+
         if let Some(ref thread_ts) = msg.thread_ts {
             payload["thread_ts"] = serde_json::json!(thread_ts);
         }
@@ -321,6 +325,7 @@ mod tests {
             thread_ts: None,
             user_id: "U01XYZ".into(),
             user_name: "tanaka".into(),
+            email: Some("tanaka@example.jp".into()),
             text: "Hello everyone!".into(),
             message_type: SlackMessageType::Message,
             edited: None,

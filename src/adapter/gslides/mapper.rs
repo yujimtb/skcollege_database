@@ -83,6 +83,7 @@ impl<C: GoogleSlidesClient> GoogleSlidesAdapter<C> {
         };
 
         let payload = serde_json::json!({
+            "title": meta.title,
             "artifact": {
                 "provider": "google",
                 "service": "slides",
@@ -101,6 +102,7 @@ impl<C: GoogleSlidesClient> GoogleSlidesAdapter<C> {
                 "blobRef": native_blob_ref.as_ref().map(|b| b.as_str().to_string()),
             },
             "relations": {
+                "owner": meta.owner,
                 "editors": meta.editors,
                 "viewers": meta.viewers,
             },
@@ -198,6 +200,7 @@ impl<C: GoogleSlidesClient> SourceAdapter for GoogleSlidesAdapter<C> {
                     "https://docs.google.com/presentation/d/{}",
                     rev.presentation_id
                 ),
+                owner: None,
                 editors: vec![],
                 viewers: vec![],
             };
@@ -280,6 +283,7 @@ mod tests {
             title: "寮紹介スライド".into(),
             container_id: Some("folder789".into()),
             canonical_uri: "https://docs.google.com/presentation/d/pres123".into(),
+            owner: Some("owner@example.com".into()),
             editors: vec!["editor@example.com".into()],
             viewers: vec!["viewer@example.com".into()],
         }
@@ -316,6 +320,7 @@ mod tests {
         assert_eq!(draft.payload["revision"]["captureMode"], "snapshot");
         assert_eq!(draft.payload["artifact"]["provider"], "google");
         assert_eq!(draft.payload["artifact"]["service"], "slides");
+        assert_eq!(draft.payload["title"], "寮紹介スライド");
     }
 
     #[test]
@@ -356,6 +361,7 @@ mod tests {
             draft.payload["relations"]["editors"][0],
             "editor@example.com"
         );
+        assert_eq!(draft.payload["relations"]["owner"], "owner@example.com");
     }
 
     #[test]

@@ -215,7 +215,7 @@ fn end_to_end_observation_to_person_page() {
     assert!(suzuki.sources.contains(&"google".to_string()));
 
     // 3. Run person page projector.
-    let pp_output = PersonPageProjector::project(identity, all_obs);
+    let pp_output = PersonPageProjector::project(identity, all_obs, &[]);
 
     assert_eq!(pp_output.profiles.len(), 2);
     assert_eq!(pp_output.activities.len(), 2);
@@ -272,8 +272,8 @@ fn replay_law_identity_and_person_page() {
         r2[0].resolved_persons[0].canonical_name
     );
 
-    let pp1 = PersonPageProjector::project(&r1[0], &obs);
-    let pp2 = PersonPageProjector::project(&r2[0], &obs);
+    let pp1 = PersonPageProjector::project(&r1[0], &obs, &[]);
+    let pp2 = PersonPageProjector::project(&r2[0], &obs, &[]);
 
     assert_eq!(pp1.profiles.len(), pp2.profiles.len());
     assert_eq!(pp1.messages.len(), pp2.messages.len());
@@ -349,7 +349,7 @@ fn api_response_envelope_contract() {
 
     let projector = IdentityProjector::new("1.0.0");
     let identity = &projector.project(&obs)[0];
-    let pp = PersonPageProjector::project(identity, &obs);
+    let pp = PersonPageProjector::project(identity, &obs, &[]);
 
     let metadata = dokp::api::envelope::ProjectionMetadata {
         projection_id: ProjectionRef::new("proj:person-page"),
@@ -386,7 +386,7 @@ fn api_pagination_over_person_list() {
 
     let projector = IdentityProjector::new("1.0.0");
     let identity = &projector.project(&obs)[0];
-    let pp = PersonPageProjector::project(identity, &obs);
+    let pp = PersonPageProjector::project(identity, &obs, &[]);
 
     let list_items: Vec<_> = pp
         .profiles
@@ -433,7 +433,7 @@ fn filtering_before_exposure_masks_restricted_fields() {
 
     let projector = IdentityProjector::new("1.0.0");
     let identity = &projector.project(&obs)[0];
-    let pp = PersonPageProjector::project(identity, &obs);
+    let pp = PersonPageProjector::project(identity, &obs, &[]);
 
     // Serialize a profile to JSON.
     let profile_json = serde_json::to_value(&pp.profiles[0]).unwrap();
