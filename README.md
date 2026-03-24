@@ -1,5 +1,7 @@
 # DOKP — Dormitory Observation & Knowledge Platform
 
+公開用リポジトリとして維持する前提で、機密情報とローカル実行データは Git 管理対象から外しています。運用上の扱いは [SECURITY.md](SECURITY.md) を参照してください。
+
 ## Document Map
 
 ### Specifications
@@ -80,6 +82,8 @@
 1. `.env.example` を参考に `.env` を作る
 2. 最低限、以下を設定する
 
+`.env`、OAuth client JSON、SQLite、blob directory はローカル専用です。公開リポジトリには含めません。
+
 - `DOKP_SLACK_BOT_TOKEN`
 - `DOKP_SLACK_CHANNEL_IDS`
 - `DOKP_GOOGLE_PRESENTATION_IDS`
@@ -131,8 +135,13 @@ cargo run --bin dokp-selfhost
 ### Notes
 
 - 永続化は SQLite + ローカル blob directory を使います
+- 既定の runtime state は `./data/` 配下に作られ、このディレクトリは Git では無視されます
+- SQLite にある観測が重複していた場合、bootstrap は黙って捨てずにエラーとして扱います
 - API は internal-only 前提で、現状は簡易構成のため認証を入れていません
 - person detail では `Filtering-before-Exposure` により `identities` を非表示にしています
+- identity / person-page の時刻は壁時計ではなく入力観測・補助レコードから導出し、replay の決定性を保ちます
+- slide-analysis と Notion write-back の失敗は同期中に握り潰さず、その場で返します
+- 秘密鍵・アクセストークンを一度でもローカルで使った場合は、公開前に新しい値へローテーションしてください
 
 ## Reading Order
 

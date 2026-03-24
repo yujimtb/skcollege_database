@@ -1,2 +1,13 @@
+# Build outputs
 /target
+
+# Local environment and credentials
 .env
+.env.*
+!.env.example
+client_secret.json
+
+# Local runtime state
+data/*
+!data/.gitkeep
+!data/README.md
