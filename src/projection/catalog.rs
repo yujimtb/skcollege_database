@@ -263,6 +263,7 @@ mod tests {
             filter_schemas: vec![],
             filter_derivations: vec![],
         });
+        spec.reconciliation = Some(ReconciliationPolicy::LakeFirst);
         spec
     }
 

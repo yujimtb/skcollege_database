@@ -37,6 +37,8 @@ fn slack_observation(user_id: &str, email: &str, name: &str, text: &str, channel
             "email": email,
             "text": text,
             "channel": channel,
+            "channel_id": format!("chan:{channel}"),
+            "channel_name": channel,
         }),
         attachments: vec![],
         published: chrono::Utc::now(),

@@ -71,20 +71,24 @@ impl NotionClient {
         Ok(Self { http, config, schema })
     }
 
-    fn headers(&self) -> HeaderMap {
+    fn headers(&self) -> Result<HeaderMap, AdapterError> {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", self.config.token))
-                .unwrap_or_else(|_| HeaderValue::from_static("")),
+                .map_err(|err| AdapterError::AuthFailure {
+                    message: format!("invalid Notion bearer token header: {err}"),
+                })?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "Notion-Version",
             HeaderValue::from_str(&self.config.api_version)
-                .unwrap_or_else(|_| HeaderValue::from_static("2022-06-28")),
+                .map_err(|err| AdapterError::Other(format!(
+                    "invalid Notion-Version header: {err}"
+                )))?,
         );
-        headers
+        Ok(headers)
     }
 
     /// Low-level API call.
@@ -103,7 +107,7 @@ impl NotionClient {
             _ => return Err(AdapterError::Other(format!("unsupported method: {method}"))),
         };
 
-        let request = request.headers(self.headers());
+        let request = request.headers(self.headers()?);
         let request = if let Some(body) = body {
             request.json(body)
         } else {
@@ -287,7 +291,7 @@ impl NotionClient {
 
         // Delete existing bot section blocks
         for block_id in &delete_queue {
-            let _ = self.delete_block(block_id);
+            self.delete_block(block_id)?;
         }
 
         // Build new content blocks
@@ -897,5 +901,22 @@ mod tests {
             }),
         };
         assert!(!is_bot_section_marker(&block));
+    }
+
+    #[test]
+    fn headers_reject_invalid_bearer_token() {
+        let mut client = fixture_client();
+        client.config.token = "bad\r\ntoken".into();
+        assert!(matches!(
+            client.headers(),
+            Err(AdapterError::AuthFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn headers_reject_invalid_api_version() {
+        let mut client = fixture_client();
+        client.config.api_version = "bad\r\nversion".into();
+        assert!(matches!(client.headers(), Err(AdapterError::Other(_))));
     }
 }

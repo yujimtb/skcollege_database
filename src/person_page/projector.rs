@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::domain::{EntityRef, Observation, ObservationId, SchemaRef, SupplementalRecord};
 use crate::identity::types::{IdentifierType, IdentityResolutionOutput, ResolvedPerson};
@@ -43,7 +43,19 @@ impl PersonPageProjector {
                 Self::collect_related(person, observations, &person_identifiers);
 
             let activity = Self::build_activity(&person.person_id, &slides, &messages);
-            let frontend_profile = frontend_profiles.get(person.person_id.as_str()).cloned();
+            let frontend_profile = frontend_profiles
+                .get(person.person_id.as_str())
+                .map(|(_, profile)| profile.clone());
+            let frontend_profile_updated_at = frontend_profiles
+                .get(person.person_id.as_str())
+                .map(|(updated_at, _)| *updated_at);
+            let profile_updated_at = activity
+                .last_activity
+                .into_iter()
+                .chain(frontend_profile_updated_at)
+                .max()
+                .or(activity.first_activity)
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
 
             let profile = PersonProfile {
                 person_id: person.person_id.clone(),
@@ -79,7 +91,7 @@ impl PersonPageProjector {
                     .collect(),
                 source_count: person.sources.len(),
                 last_activity: activity.last_activity,
-                profile_updated_at: Utc::now(),
+                profile_updated_at,
                 frontend_profile,
             };
 
@@ -101,12 +113,12 @@ impl PersonPageProjector {
         observations: &[Observation],
         supplemental_records: &[&SupplementalRecord],
         identifier_map: &HashMap<String, EntityRef>,
-    ) -> HashMap<String, FrontendProfile> {
+    ) -> HashMap<String, (DateTime<Utc>, FrontendProfile)> {
         let observation_index: HashMap<ObservationId, &Observation> = observations
             .iter()
             .map(|observation| (observation.id.clone(), observation))
             .collect();
-        let mut results: HashMap<String, (chrono::DateTime<chrono::Utc>, FrontendProfile)> = HashMap::new();
+        let mut results: HashMap<String, (DateTime<Utc>, FrontendProfile)> = HashMap::new();
 
         for record in supplemental_records {
             if record.kind != "slide-analysis" {
@@ -181,9 +193,6 @@ impl PersonPageProjector {
         }
 
         results
-            .into_iter()
-            .map(|(person_id, (_, profile))| (person_id, profile))
-            .collect()
     }
 
     fn person_id_from_slide_observation(
@@ -304,7 +313,9 @@ impl PersonPageProjector {
                     .to_string();
                 let channel = obs
                     .payload
-                    .get("channel")
+                    .get("channel_name")
+                    .or_else(|| obs.payload.get("channel"))
+                    .or_else(|| obs.payload.get("channel_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
@@ -488,6 +499,8 @@ mod tests {
                 "email": email,
                 "text": text,
                 "channel": channel,
+                "channel_id": format!("chan:{channel}"),
+                "channel_name": channel,
             }),
             attachments: vec![],
             published: Utc::now(),
@@ -639,8 +652,43 @@ mod tests {
 
         let r1 = PersonPageProjector::project(&identity, &observations, &[]);
         let r2 = PersonPageProjector::project(&identity, &observations, &[]);
-        assert_eq!(r1.profiles.len(), r2.profiles.len());
-        assert_eq!(r1.messages.len(), r2.messages.len());
-        assert_eq!(r1.slides.len(), r2.slides.len());
+        assert_eq!(
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap()
+        );
+    }
+
+    #[test]
+    fn adapter_payload_shape_uses_channel_name() {
+        let identity = sample_identity();
+        let observation = Observation {
+            id: Observation::new_id(),
+            schema: SchemaRef::new("schema:slack-message"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:slack-crawler"),
+            source_system: Some(SourceSystemRef::new("sys:slack")),
+            actor: None,
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            subject: EntityRef::new("message:slack:s1"),
+            target: None,
+            payload: serde_json::json!({
+                "user_id": "U123",
+                "email": "tanaka@example.jp",
+                "text": "hello",
+                "channel_id": "C01ABC",
+                "channel_name": "general",
+            }),
+            attachments: vec![],
+            published: Utc::now(),
+            recorded_at: Utc::now(),
+            consent: None,
+            idempotency_key: Some(IdempotencyKey::new("s1")),
+            meta: serde_json::json!({}),
+        };
+
+        let output = PersonPageProjector::project(&identity, &[observation], &[]);
+        assert_eq!(output.messages.len(), 1);
+        assert_eq!(output.messages[0].channel, "general");
     }
 }

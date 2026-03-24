@@ -66,6 +66,8 @@ pub struct SlackFile {
     pub name: String,
     pub mimetype: String,
     pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
     /// Set after blob upload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob_ref: Option<String>,

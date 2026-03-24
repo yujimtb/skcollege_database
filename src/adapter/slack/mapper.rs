@@ -412,6 +412,7 @@ mod tests {
             name: "photo.jpg".into(),
             mimetype: "image/jpeg".into(),
             size: 12345,
+            download_url: None,
             blob_ref: Some("blob:sha256:abcdef".into()),
         }];
 

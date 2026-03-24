@@ -66,10 +66,15 @@ impl PropagationScheduler {
         lake: &LakeStore,
         watermarks: &mut WatermarkStore,
         catalog: &mut ProjectionCatalog,
-    ) -> Vec<(ProjectionRef, PropagationResult)> {
+    ) -> Result<Vec<(ProjectionRef, PropagationResult)>, crate::projection::catalog::CatalogError> {
         let order = match catalog.topological_order() {
             Ok(o) => o,
-            Err(_) => return vec![],
+            Err(err) => {
+                for proj_id in catalog.list_ids() {
+                    catalog.set_health(&proj_id, ProjectionHealth::Broken);
+                }
+                return Err(err);
+            }
         };
 
         let mut results = Vec::new();
@@ -95,7 +100,7 @@ impl PropagationScheduler {
             ));
         }
 
-        results
+        Ok(results)
     }
 
     /// Mark downstream projections as degraded when an upstream fails.
@@ -181,7 +186,8 @@ mod tests {
         let mut catalog = ProjectionCatalog::new();
         catalog.register(lake_spec("proj:a")).unwrap();
 
-        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog);
+        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, PropagationResult::NoOp);
     }
@@ -196,7 +202,8 @@ mod tests {
         let mut catalog = ProjectionCatalog::new();
         catalog.register(lake_spec("proj:a")).unwrap();
 
-        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog);
+        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(matches!(
             results[0].1,
@@ -204,7 +211,8 @@ mod tests {
         ));
 
         // Second run should be no-op.
-        let results2 = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog);
+        let results2 = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog)
+            .unwrap();
         assert_eq!(results2[0].1, PropagationResult::NoOp);
     }
 
@@ -217,17 +225,61 @@ mod tests {
         let mut catalog = ProjectionCatalog::new();
         catalog.register(lake_spec("proj:a")).unwrap();
 
-        PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog);
+        PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog).unwrap();
 
         // Add more data.
         lake.append(sample_obs("k2")).unwrap();
         lake.append(sample_obs("k3")).unwrap();
 
-        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog);
+        let results = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog)
+            .unwrap();
         assert!(matches!(
             results[0].1,
             PropagationResult::Applied { new_position: 3, new_records: 2 }
         ));
+    }
+
+    #[test]
+    fn cycle_error_is_returned_and_health_is_broken() {
+        let lake = LakeStore::new();
+        let mut watermarks = WatermarkStore::new();
+        let mut catalog = ProjectionCatalog::new();
+        catalog.register(lake_spec("proj:a")).unwrap();
+
+        let mut dep = lake_spec("proj:b");
+        dep.sources.insert(0, SourceDecl {
+            source: SourceRef::Projection {
+                id: ProjectionRef::new("proj:a"),
+                version: ">=1.0.0".into(),
+            },
+            filter_schemas: vec![],
+            filter_derivations: vec![],
+        });
+        dep.reconciliation = Some(ReconciliationPolicy::LakeFirst);
+        catalog.register(dep).unwrap();
+
+        let entry = catalog.get_mut(&ProjectionRef::new("proj:a")).unwrap();
+        entry.spec.sources.insert(0, SourceDecl {
+            source: SourceRef::Projection {
+                id: ProjectionRef::new("proj:b"),
+                version: ">=1.0.0".into(),
+            },
+            filter_schemas: vec![],
+            filter_derivations: vec![],
+        });
+        entry.spec.reconciliation = Some(ReconciliationPolicy::LakeFirst);
+
+        let err = PropagationScheduler::propagate_all(&lake, &mut watermarks, &mut catalog)
+            .unwrap_err();
+        assert_eq!(err, crate::projection::catalog::CatalogError::CyclicDependency);
+        assert_eq!(
+            catalog.get(&ProjectionRef::new("proj:a")).unwrap().health,
+            ProjectionHealth::Broken
+        );
+        assert_eq!(
+            catalog.get(&ProjectionRef::new("proj:b")).unwrap().health,
+            ProjectionHealth::Broken
+        );
     }
 
     #[test]
@@ -244,6 +296,7 @@ mod tests {
             filter_schemas: vec![],
             filter_derivations: vec![],
         });
+        dep.reconciliation = Some(ReconciliationPolicy::LakeFirst);
         catalog.register(dep).unwrap();
 
         PropagationScheduler::propagate_upstream_failure(

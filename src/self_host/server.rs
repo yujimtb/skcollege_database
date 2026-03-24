@@ -114,7 +114,7 @@ impl ApiError {
     fn internal(detail: String) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            body: ErrorResponse::bad_request(&detail),
+            body: ErrorResponse::internal_server_error(&detail),
         }
     }
 }
@@ -136,7 +136,7 @@ impl From<SelfHostError> for ApiError {
             },
             other => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                body: ErrorResponse::bad_request(&other.to_string()),
+                body: ErrorResponse::internal_server_error(&other.to_string()),
             },
         }
     }

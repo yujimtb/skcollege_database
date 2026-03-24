@@ -152,9 +152,8 @@ impl ProjectionSpec {
         }
 
         // Multi-source requires reconciliation (M05 §4.3).
-        let has_lake = self.sources.iter().any(|s| matches!(s.source, SourceRef::Lake));
         let has_source_native = self.sources.iter().any(|s| matches!(s.source, SourceRef::SourceNative { .. }));
-        if has_lake && has_source_native && self.reconciliation.is_none() {
+        if self.sources.len() > 1 && self.reconciliation.is_none() {
             errors.push(SpecValidationError::MultiSourceWithoutReconciliation);
         }
 
@@ -277,6 +276,22 @@ mod tests {
         });
         spec.reconciliation = Some(ReconciliationPolicy::LakeFirst);
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn lake_and_projection_without_reconciliation_rejected() {
+        let mut spec = base_spec();
+        spec.deterministic_in.clear();
+        spec.sources.push(SourceDecl {
+            source: SourceRef::Projection {
+                id: ProjectionRef::new("proj:identity"),
+                version: ">=1.0.0".into(),
+            },
+            filter_schemas: vec![],
+            filter_derivations: vec![],
+        });
+        let errs = spec.validate().unwrap_err();
+        assert!(errs.contains(&SpecValidationError::MultiSourceWithoutReconciliation));
     }
 
     #[test]

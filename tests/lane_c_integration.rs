@@ -44,6 +44,8 @@ fn slack_observation(user_id: &str, email: &str, name: &str, text: &str, channel
             "email": email,
             "text": text,
             "channel": channel,
+            "channel_id": format!("chan:{channel}"),
+            "channel_name": channel,
         }),
         attachments: vec![],
         published: Utc::now(),
@@ -266,18 +268,18 @@ fn replay_law_identity_and_person_page() {
     let r1 = projector.project(&obs);
     let r2 = projector.project(&obs);
 
-    assert_eq!(r1[0].resolved_persons.len(), r2[0].resolved_persons.len());
     assert_eq!(
-        r1[0].resolved_persons[0].canonical_name,
-        r2[0].resolved_persons[0].canonical_name
+        serde_json::to_value(&r1).unwrap(),
+        serde_json::to_value(&r2).unwrap()
     );
 
     let pp1 = PersonPageProjector::project(&r1[0], &obs, &[]);
     let pp2 = PersonPageProjector::project(&r2[0], &obs, &[]);
 
-    assert_eq!(pp1.profiles.len(), pp2.profiles.len());
-    assert_eq!(pp1.messages.len(), pp2.messages.len());
-    assert_eq!(pp1.slides.len(), pp2.slides.len());
+    assert_eq!(
+        serde_json::to_value(&pp1).unwrap(),
+        serde_json::to_value(&pp2).unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ pub struct PersonCandidate {
     pub source: String,
     pub identifiers: Vec<SourceIdentifier>,
     pub display_name: Option<String>,
+    pub observed_at: DateTime<Utc>,
 }
 
 /// Match type between two person candidates.

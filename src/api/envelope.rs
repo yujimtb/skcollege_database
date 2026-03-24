@@ -39,6 +39,14 @@ impl ErrorResponse {
         Self { error: "bad_request".into(), detail: Some(detail.into()), retry_after: None }
     }
 
+    pub fn internal_server_error(detail: &str) -> Self {
+        Self {
+            error: "internal_server_error".into(),
+            detail: Some(detail.into()),
+            retry_after: None,
+        }
+    }
+
     pub fn unauthorized() -> Self {
         Self { error: "unauthorized".into(), detail: None, retry_after: None }
     }
@@ -112,6 +120,9 @@ mod tests {
     fn error_response_variants() {
         let e = ErrorResponse::bad_request("invalid param");
         assert_eq!(e.error, "bad_request");
+
+        let e = ErrorResponse::internal_server_error("boom");
+        assert_eq!(e.error, "internal_server_error");
 
         let e = ErrorResponse::not_found();
         assert_eq!(e.error, "not_found");

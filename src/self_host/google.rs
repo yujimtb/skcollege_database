@@ -239,7 +239,12 @@ impl GoogleTokenSource {
             return Ok(token);
         }
 
-        if let Some(cached) = self.cached.lock().unwrap().clone() {
+        if let Some(cached) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
             if cached.expires_at > Instant::now() {
                 return Ok(cached.access_token);
             }
@@ -281,7 +286,10 @@ impl GoogleTokenSource {
 
         let access_token = token.access_token;
         let expires_in = token.expires_in.unwrap_or(3600).saturating_sub(60);
-        *self.cached.lock().unwrap() = Some(CachedToken {
+        *self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedToken {
             access_token: access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(expires_in),
         });

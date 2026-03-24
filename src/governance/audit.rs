@@ -29,19 +29,25 @@ impl InMemoryAuditLog {
     }
 
     pub fn all_events(&self) -> Vec<AuditEvent> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
 impl AuditLog for InMemoryAuditLog {
     fn emit(&self, event: AuditEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event);
     }
 
     fn events_since(&self, since: chrono::DateTime<chrono::Utc>) -> Vec<AuditEvent> {
         self.events
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|e| e.timestamp >= since)
             .cloned()
@@ -49,7 +55,10 @@ impl AuditLog for InMemoryAuditLog {
     }
 
     fn count(&self) -> usize {
-        self.events.lock().unwrap().len()
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
@@ -71,7 +80,10 @@ impl AuditEmitter {
     }
 
     pub fn emit(&self, actor: &ActorRef, kind: AuditEventKind, detail: serde_json::Value) {
-        let mut counter = self.next_id.lock().unwrap();
+        let mut counter = self
+            .next_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let id = format!("audit:{}", *counter);
         *counter += 1;
 

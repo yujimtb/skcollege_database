@@ -69,46 +69,71 @@ impl FilteringGate {
         field_path: &str,
         strategy: MaskStrategy,
     ) -> bool {
-        let obj = match value.as_object_mut() {
-            Some(o) => o,
-            None => return false,
-        };
+        match value {
+            serde_json::Value::Object(obj) => {
+                // Support single-level dotted paths (e.g., "contact.email")
+                let parts: Vec<&str> = field_path.splitn(2, '.').collect();
 
-        // Support single-level dotted paths (e.g., "contact.email")
-        let parts: Vec<&str> = field_path.splitn(2, '.').collect();
-
-        if parts.len() == 1 {
-            // Top-level field
-            let key = parts[0];
-            if !obj.contains_key(key) {
-                return false;
-            }
-            match strategy {
-                MaskStrategy::Exclude => {
-                    obj.remove(key);
-                }
-                MaskStrategy::Redact => {
-                    obj.insert(key.to_string(), serde_json::Value::String("[REDACTED]".into()));
-                }
-                MaskStrategy::Hash => {
-                    if let Some(val) = obj.get(key) {
-                        let hash = format!("{:x}", sha2::Digest::finalize(
-                            sha2::Sha256::new_with_prefix(val.to_string().as_bytes()),
-                        ));
-                        obj.insert(key.to_string(), serde_json::Value::String(hash));
+                if parts.len() == 1 {
+                    let key = parts[0];
+                    if obj.contains_key(key) {
+                        match strategy {
+                            MaskStrategy::Exclude => {
+                                obj.remove(key);
+                            }
+                            MaskStrategy::Redact => {
+                                obj.insert(
+                                    key.to_string(),
+                                    serde_json::Value::String("[REDACTED]".into()),
+                                );
+                            }
+                            MaskStrategy::Hash => {
+                                if let Some(val) = obj.get(key) {
+                                    let hash = format!(
+                                        "{:x}",
+                                        sha2::Digest::finalize(
+                                            sha2::Sha256::new_with_prefix(
+                                                val.to_string().as_bytes(),
+                                            ),
+                                        )
+                                    );
+                                    obj.insert(
+                                        key.to_string(),
+                                        serde_json::Value::String(hash),
+                                    );
+                                }
+                            }
+                        }
+                        true
+                    } else {
+                        let mut masked = false;
+                        for child in obj.values_mut() {
+                            masked |= Self::apply_mask(child, field_path, strategy);
+                        }
+                        masked
+                    }
+                } else {
+                    let parent_key = parts[0];
+                    let child_path = parts[1];
+                    if let Some(child) = obj.get_mut(parent_key) {
+                        Self::apply_mask(child, child_path, strategy)
+                    } else {
+                        let mut masked = false;
+                        for child in obj.values_mut() {
+                            masked |= Self::apply_mask(child, field_path, strategy);
+                        }
+                        masked
                     }
                 }
             }
-            true
-        } else {
-            // Nested: recurse into first part
-            let parent_key = parts[0];
-            let child_path = parts[1];
-            if let Some(child) = obj.get_mut(parent_key) {
-                Self::apply_mask(child, child_path, strategy)
-            } else {
-                false
+            serde_json::Value::Array(items) => {
+                let mut masked = false;
+                for item in items {
+                    masked |= Self::apply_mask(item, field_path, strategy);
+                }
+                masked
             }
+            _ => false,
         }
     }
 }
@@ -237,5 +262,40 @@ mod tests {
         let result = FilteringGate::filter(&payload, AccessScope::Public, &[]);
         assert_eq!(result.payload, payload);
         assert!(result.masked_fields.is_empty());
+    }
+
+    #[test]
+    fn array_root_is_masked() {
+        let payload = json!([
+            {"email": "alice@example.com"},
+            {"email": "bob@example.com"}
+        ]);
+        let specs = vec![RestrictedFieldSpec {
+            field_path: "email".into(),
+            level: AccessScope::HighlySensitive,
+            mask_strategy: MaskStrategy::Exclude,
+        }];
+        let result = FilteringGate::filter(&payload, AccessScope::Internal, &specs);
+        assert!(result.payload[0].get("email").is_none());
+        assert!(result.payload[1].get("email").is_none());
+    }
+
+    #[test]
+    fn descendant_field_inside_paginated_array_is_masked() {
+        let payload = json!({
+            "data": [
+                {"identities": ["slack:U1"], "display_name": "Alice"},
+                {"identities": ["slack:U2"], "display_name": "Bob"}
+            ],
+            "total": 2
+        });
+        let specs = vec![RestrictedFieldSpec {
+            field_path: "identities".into(),
+            level: AccessScope::Restricted,
+            mask_strategy: MaskStrategy::Exclude,
+        }];
+        let result = FilteringGate::filter(&payload, AccessScope::Internal, &specs);
+        assert!(result.payload["data"][0].get("identities").is_none());
+        assert!(result.payload["data"][1].get("identities").is_none());
     }
 }

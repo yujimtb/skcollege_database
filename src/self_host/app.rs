@@ -103,10 +103,17 @@ pub struct AppCore {
 }
 
 impl AppCore {
-    fn new(observations: Vec<Observation>, persisted_blobs: Vec<Vec<u8>>) -> Self {
+    fn new(
+        observations: Vec<Observation>,
+        persisted_blobs: Vec<Vec<u8>>,
+    ) -> Result<Self, SelfHostError> {
         let mut lake = LakeStore::new();
         for observation in observations {
-            let _ = lake.append(observation);
+            lake.append(observation).map_err(|existing_id| {
+                SelfHostError::Ingestion(format!(
+                    "duplicate persisted observation detected during bootstrap: {existing_id}"
+                ))
+            })?;
         }
 
         let mut blobs = BlobStore::new();
@@ -125,7 +132,7 @@ impl AppCore {
             last_sync_error: None,
         };
         core.rebuild_snapshot();
-        core
+        Ok(core)
     }
 
     fn rebuild_snapshot(&mut self) {
@@ -214,7 +221,7 @@ impl AppService {
             .transpose()?;
 
         Ok(Self {
-            core: Arc::new(Mutex::new(AppCore::new(observations, blobs))),
+            core: Arc::new(Mutex::new(AppCore::new(observations, blobs)?)),
             persistence: Arc::new(Mutex::new(persistence)),
             config: Arc::new(config),
             slack_client,
@@ -249,7 +256,7 @@ impl AppService {
         let slack_adapter = SlackAdapter::new(self.slack_client.clone(), self.slack_adapter_config());
         for channel_id in &self.config.slack.channel_ids {
             let cursor_key = format!("slack:{channel_id}:oldest_ts");
-            let oldest = self.persistence_lock()?.get_state(&cursor_key)?;
+            let oldest = non_empty_state(self.persistence_lock()?.get_state(&cursor_key)?);
             let mut page_cursor: Option<String> = None;
             let mut latest_ts = oldest.clone();
 
@@ -259,6 +266,13 @@ impl AppService {
                     .conversations_history(channel_id, oldest.as_deref(), page_cursor.as_deref(), 200)?;
                 for mut message in page.messages {
                     message.channel_id = channel_id.clone();
+                    for file in &mut message.files {
+                        if file.blob_ref.is_none() {
+                            let data = self.slack_client.file_download(file)?;
+                            let blob_ref = self.store_blob(&data)?;
+                            file.blob_ref = Some(blob_ref.as_str().to_string());
+                        }
+                    }
                     if latest_ts
                         .as_ref()
                         .map(|current| slack_ts_value(&message.ts) > slack_ts_value(current))
@@ -286,7 +300,9 @@ impl AppService {
                 _ => {}
             }
 
-            self.persistence_lock()?.set_state(&cursor_key, latest_ts.as_deref().unwrap_or(""))?;
+            if let Some(latest_ts) = latest_ts.as_deref() {
+                self.persistence_lock()?.set_state(&cursor_key, latest_ts)?;
+            }
         }
 
         match self.ingest_draft(slack_adapter.heartbeat())? {
@@ -580,12 +596,29 @@ impl AppService {
 
             for result in &analysis_results {
                 let record = crate::slide_analysis::SlideAnalysisProjector::build_supplemental(result);
-                let _ = core.add_supplemental(record);
+                core.add_supplemental(record)
+                    .map_err(|err| SelfHostError::Ingestion(err.to_string()))?;
             }
 
             for result in &analysis_results {
                 let draft = crate::slide_analysis::SlideAnalysisProjector::create_analysis_observation(result);
-                let _ = core.ingest(draft);
+                match core.ingest(draft) {
+                    IngestResult::Ingested { id, .. } => {
+                        let observation = core.lake.get(&id).cloned().ok_or_else(|| {
+                            SelfHostError::Ingestion(format!(
+                                "observation {id} missing after append"
+                            ))
+                        })?;
+                        self.persistence_lock()?.persist_observation(&observation)?;
+                    }
+                    IngestResult::Rejected { message, .. } => {
+                        return Err(SelfHostError::Ingestion(message));
+                    }
+                    IngestResult::Quarantined { ticket } => {
+                        return Err(SelfHostError::Ingestion(ticket.reason));
+                    }
+                    IngestResult::Duplicate { .. } => {}
+                }
             }
         }
 
@@ -634,11 +667,9 @@ impl AppService {
 
         if let Some(notion) = &self.notion_client {
             for mut write_record in notion_write_records {
-                write_record.external_id = notion.find_existing(&write_record.entity_id).ok().flatten();
-                match notion.write_record(&write_record) {
-                    Ok(_) => notion_synced += 1,
-                    Err(err) => eprintln!("notion write error for {}: {err}", write_record.entity_id),
-                }
+                write_record.external_id = notion.find_existing(&write_record.entity_id)?;
+                notion.write_record(&write_record)?;
+                notion_synced += 1;
             }
         }
 
@@ -1069,6 +1100,10 @@ fn revisions_after_cursor(
         .collect()
 }
 
+fn non_empty_state(value: Option<String>) -> Option<String> {
+    value.filter(|raw| !raw.trim().is_empty())
+}
+
 fn restricted_fields() -> Vec<RestrictedFieldSpec> {
     vec![RestrictedFieldSpec {
         field_path: "identities".into(),
@@ -1317,4 +1352,59 @@ fn analysis_record_is_rich(record: &crate::domain::SupplementalRecord) -> bool {
         || profile.properties.turning_point.is_some()
         || profile.properties.btw.is_some()
         || profile.properties.message.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::{AppCore, SelfHostError, non_empty_state};
+    use crate::domain::{
+        AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Observation, ObserverRef,
+        SchemaRef, SemVer,
+    };
+
+    #[test]
+    fn non_empty_state_filters_blank_values() {
+        assert_eq!(non_empty_state(None), None);
+        assert_eq!(non_empty_state(Some(String::new())), None);
+        assert_eq!(non_empty_state(Some("   ".to_string())), None);
+        assert_eq!(
+            non_empty_state(Some("1234567890.123456".to_string())).as_deref(),
+            Some("1234567890.123456")
+        );
+    }
+
+    #[test]
+    fn app_core_new_rejects_duplicate_persisted_observations() {
+        fn observation(id: &str, key: &str) -> Observation {
+            Observation {
+                id: Observation::new_id(),
+                schema: SchemaRef::new("schema:test"),
+                schema_version: SemVer::new("1.0.0"),
+                observer: ObserverRef::new("obs:test"),
+                source_system: None,
+                actor: None,
+                authority_model: AuthorityModel::LakeAuthoritative,
+                capture_model: CaptureModel::Event,
+                subject: EntityRef::new(format!("entity:{id}")),
+                target: None,
+                payload: serde_json::json!({ "id": id }),
+                attachments: vec![],
+                published: Utc::now(),
+                recorded_at: Utc::now(),
+                consent: None,
+                idempotency_key: Some(IdempotencyKey::new(key)),
+                meta: serde_json::json!({}),
+            }
+        }
+
+        let observations = vec![
+            observation("one", "dup-key"),
+            observation("two", "dup-key"),
+        ];
+
+        let err = AppCore::new(observations, vec![]).unwrap_err();
+        assert!(matches!(err, SelfHostError::Ingestion(_)));
+    }
 }

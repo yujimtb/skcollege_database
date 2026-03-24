@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::domain::{EntityRef, Observation};
 use crate::governance::types::ConfidenceLevel;
@@ -99,6 +99,7 @@ impl IdentityProjector {
             source: "slack".into(),
             identifiers,
             display_name: user_name.map(String::from),
+            observed_at: obs.published,
         })
     }
 
@@ -123,6 +124,7 @@ impl IdentityProjector {
                                 value: email.to_string(),
                             }],
                             display_name: None,
+                            observed_at: obs.published,
                         });
                     }
                 }
@@ -143,6 +145,7 @@ impl IdentityProjector {
                         value: owner.to_string(),
                     }],
                     display_name: None,
+                    observed_at: obs.published,
                 });
             }
         }
@@ -195,6 +198,7 @@ impl IdentityProjector {
             source: "slide-analysis".into(),
             identifiers,
             display_name,
+            observed_at: obs.published,
         })
     }
 
@@ -349,22 +353,27 @@ impl IdentityProjector {
             groups.entry(root).or_default().push(i);
         }
 
-        let now = Utc::now();
         let mut resolved_persons = Vec::new();
         let mut person_identifiers = Vec::new();
-        let mut id_counter = 0u64;
+        let mut grouped_members: Vec<Vec<usize>> = groups.into_values().collect();
+        for members in &mut grouped_members {
+            members.sort_unstable();
+        }
+        grouped_members.sort_by_key(|members| members[0]);
 
-        for (_, members) in &groups {
-            id_counter += 1;
-            let person_id = EntityRef::new(format!("person:resolved-{id_counter}"));
+        for (group_index, members) in grouped_members.iter().enumerate() {
+            let person_seq = group_index + 1;
+            let person_id = EntityRef::new(format!("person:resolved-{person_seq}"));
 
             let mut all_identifiers = Vec::new();
             let mut all_sources = Vec::new();
             let mut all_aliases = Vec::new();
             let mut canonical_name = None;
+            let mut resolved_at = DateTime::<Utc>::UNIX_EPOCH;
 
             for &member_idx in members {
                 let candidate = &candidates[member_idx];
+                resolved_at = resolved_at.max(candidate.observed_at);
                 if !all_sources.contains(&candidate.source) {
                     all_sources.push(candidate.source.clone());
                 }
@@ -383,6 +392,20 @@ impl IdentityProjector {
                 }
             }
 
+            all_sources.sort();
+            all_sources.dedup();
+            all_aliases.sort();
+            all_aliases.dedup();
+            all_identifiers.sort_by(|left, right| {
+                left.source
+                    .cmp(&right.source)
+                    .then(Self::identifier_type_rank(left.identifier_type).cmp(
+                        &Self::identifier_type_rank(right.identifier_type),
+                    ))
+                    .then(left.value.cmp(&right.value))
+            });
+            all_identifiers.dedup();
+
             let confidence = if all_sources.len() > 1 {
                 // Cross-source merge → check if there's a high-confidence link.
                 ConfidenceLevel::High
@@ -390,12 +413,12 @@ impl IdentityProjector {
                 ConfidenceLevel::High // Single source, auto-resolve.
             };
 
-            let canonical = canonical_name.unwrap_or_else(|| format!("person-{id_counter}"));
+            let canonical = canonical_name.unwrap_or_else(|| format!("person-{person_seq}"));
 
             // Build identifier rows.
             for (idx, ident) in all_identifiers.iter().enumerate() {
                 person_identifiers.push(PersonIdentifierRow {
-                    identifier_id: format!("pi:{id_counter}:{idx}"),
+                    identifier_id: format!("pi:{person_seq}:{idx}"),
                     person_id: person_id.clone(),
                     source: ident.source.clone(),
                     identifier_type: ident.identifier_type,
@@ -410,7 +433,7 @@ impl IdentityProjector {
                 identifiers: all_identifiers,
                 confidence,
                 sources: all_sources,
-                resolved_at: now,
+                resolved_at,
                 resolved_by: format!("projector:identity-resolution:v{}", self.projector_version),
             });
         }
@@ -433,6 +456,14 @@ impl IdentityProjector {
 
     fn parse_pc_index(id: &str) -> Option<usize> {
         id.strip_prefix("pc:").and_then(|s| s.parse().ok())
+    }
+
+    fn identifier_type_rank(identifier_type: IdentifierType) -> u8 {
+        match identifier_type {
+            IdentifierType::Email => 0,
+            IdentifierType::UserId => 1,
+            IdentifierType::DisplayName => 2,
+        }
     }
 }
 
@@ -628,10 +659,9 @@ mod tests {
         let r1 = projector.project(&observations);
         let r2 = projector.project(&observations);
 
-        assert_eq!(r1[0].resolved_persons.len(), r2[0].resolved_persons.len());
         assert_eq!(
-            r1[0].resolved_persons[0].canonical_name,
-            r2[0].resolved_persons[0].canonical_name
+            serde_json::to_value(&r1).unwrap(),
+            serde_json::to_value(&r2).unwrap()
         );
     }
 

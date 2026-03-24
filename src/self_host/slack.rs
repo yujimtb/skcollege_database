@@ -199,14 +199,36 @@ impl SlackClient for HttpSlackClient {
         &self,
         file: &SlackFile,
     ) -> Result<Vec<u8>, AdapterError> {
+        let download_url = file.download_url.as_deref().ok_or_else(|| {
+            AdapterError::MalformedResponse {
+                message: format!("slack file {} missing download url", file.id),
+            }
+        })?;
         let response = self
             .http
-            .get(format!("https://slack.com/api/files.info?file={}", file.id))
+            .get(download_url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .send()
             .map_err(|err| AdapterError::Network {
                 message: err.to_string(),
             })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30);
+            return Err(AdapterError::RateLimited { retry_after_secs });
+        }
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(AdapterError::MalformedResponse {
+                message: format!("slack file download returned {status}: {body}"),
+            });
+        }
 
         response.bytes().map(|body| body.to_vec()).map_err(|err| AdapterError::Network {
             message: err.to_string(),
@@ -294,6 +316,10 @@ struct RawSlackFile {
     mimetype: String,
     #[serde(default)]
     size: u64,
+    #[serde(default)]
+    url_private: Option<String>,
+    #[serde(default)]
+    url_private_download: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +425,7 @@ fn to_slack_message(
                 name: file.name,
                 mimetype: file.mimetype,
                 size: file.size,
+                download_url: file.url_private_download.or(file.url_private),
                 blob_ref: None,
             })
             .collect(),
@@ -415,5 +442,43 @@ fn map_message_type(subtype: Option<&str>) -> SlackMessageType {
         Some("channel_join") => SlackMessageType::ChannelJoin,
         Some("channel_leave") => SlackMessageType::ChannelLeave,
         _ => SlackMessageType::Message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn to_slack_message_preserves_download_url() {
+        let raw = RawSlackMessage {
+            ts: "1234567890.123456".into(),
+            thread_ts: None,
+            user: Some("U123".into()),
+            text: Some("hello".into()),
+            subtype: Some("file_share".into()),
+            edited: None,
+            reactions: vec![],
+            files: vec![RawSlackFile {
+                id: "F123".into(),
+                name: "photo.jpg".into(),
+                mimetype: "image/jpeg".into(),
+                size: 42,
+                url_private: None,
+                url_private_download: Some("https://files.slack.test/F123".into()),
+            }],
+            reply_count: Some(0),
+            reply_users_count: Some(0),
+            user_profile: None,
+        };
+
+        let msg = to_slack_message(raw, "general", &HashMap::new());
+        assert_eq!(msg.message_type, SlackMessageType::FileShare);
+        assert_eq!(
+            msg.files[0].download_url.as_deref(),
+            Some("https://files.slack.test/F123")
+        );
     }
 }

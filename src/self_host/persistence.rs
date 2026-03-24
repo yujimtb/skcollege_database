@@ -54,7 +54,7 @@ impl SqlitePersistence {
     pub fn persist_observation(&self, observation: &Observation) -> Result<(), PersistenceError> {
         let json = serde_json::to_string(observation)?;
         self.conn.execute(
-            "INSERT OR IGNORE INTO observations (id, idempotency_key, recorded_at, observation_json) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO observations (id, idempotency_key, recorded_at, observation_json) VALUES (?1, ?2, ?3, ?4)",
             params![
                 observation.id.as_str(),
                 observation.idempotency_key.as_ref().map(|value| value.as_str()),
@@ -179,6 +179,21 @@ mod tests {
         let observations = store.load_observations().unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].schema, observation.schema);
+
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn duplicate_persist_observation_surfaces_constraint_error() {
+        let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
+        let db = tmp.join("test.sqlite3");
+        let blob_dir = tmp.join("blobs");
+        let store = SqlitePersistence::open(&db, &blob_dir).unwrap();
+        let observation = sample_observation();
+
+        store.persist_observation(&observation).unwrap();
+        let err = store.persist_observation(&observation).unwrap_err();
+        assert!(matches!(err, PersistenceError::Sqlite(_)));
 
         let _ = fs::remove_dir_all(tmp);
     }

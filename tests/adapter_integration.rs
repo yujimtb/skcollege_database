@@ -367,6 +367,7 @@ fn slack_file_share_with_blob() {
         name: "photo.jpg".into(),
         mimetype: "image/jpeg".into(),
         size: 1234,
+        download_url: None,
         blob_ref: Some(blob_ref.as_str().to_string()),
     }];
 
