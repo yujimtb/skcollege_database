@@ -106,6 +106,7 @@ impl AppCore {
     fn new(
         observations: Vec<Observation>,
         persisted_blobs: Vec<Vec<u8>>,
+        persisted_supplementals: Vec<crate::domain::SupplementalRecord>,
     ) -> Result<Self, SelfHostError> {
         let mut lake = LakeStore::new();
         for observation in observations {
@@ -121,12 +122,21 @@ impl AppCore {
             blobs.put(&blob);
         }
 
+        let mut supplemental = SupplementalStore::new();
+        for record in persisted_supplementals {
+            supplemental.upsert(record, &lake).map_err(|err| {
+                SelfHostError::Ingestion(format!(
+                    "invalid persisted supplemental detected during bootstrap: {err}"
+                ))
+            })?;
+        }
+
         let mut core = Self {
             registry: seed_registry(),
             catalog: seed_projection_catalog(),
             lake,
             blobs,
-            supplemental: SupplementalStore::new(),
+            supplemental,
             snapshot: ProjectionSnapshot::default(),
             last_sync_at: None,
             last_sync_error: None,
@@ -194,6 +204,7 @@ pub struct AppService {
     persistence: Arc<Mutex<SqlitePersistence>>,
     config: Arc<SelfHostConfig>,
     slack_client: HttpSlackClient,
+    slack_replies_client: HttpSlackClient,
     google_client: HttpGoogleSlidesClient,
     slide_analyzer: Option<GeminiSlideAnalyzer>,
     notion_client: Option<NotionClient>,
@@ -204,7 +215,15 @@ impl AppService {
         let persistence = SqlitePersistence::open(&config.database_path, &config.blob_dir)?;
         let observations = persistence.load_observations()?;
         let blobs = persistence.load_blobs()?;
+        let supplementals = persistence.load_supplementals()?;
         let slack_client = HttpSlackClient::new(config.slack.bot_token.clone())?;
+        let slack_replies_client = HttpSlackClient::new(
+            config
+                .slack
+                .thread_token
+                .clone()
+                .unwrap_or_else(|| config.slack.bot_token.clone()),
+        )?;
         let google_client = HttpGoogleSlidesClient::new(&config.google)?;
         let slide_analyzer = config
             .slide_ai
@@ -221,10 +240,15 @@ impl AppService {
             .transpose()?;
 
         Ok(Self {
-            core: Arc::new(Mutex::new(AppCore::new(observations, blobs)?)),
+            core: Arc::new(Mutex::new(AppCore::new(
+                observations,
+                blobs,
+                supplementals,
+            )?)),
             persistence: Arc::new(Mutex::new(persistence)),
             config: Arc::new(config),
             slack_client,
+            slack_replies_client,
             google_client,
             slide_analyzer,
             notion_client,
@@ -264,26 +288,40 @@ impl AppService {
                 let page = self
                     .slack_client
                     .conversations_history(channel_id, oldest.as_deref(), page_cursor.as_deref(), 200)?;
-                for mut message in page.messages {
-                    message.channel_id = channel_id.clone();
-                    for file in &mut message.files {
-                        if file.blob_ref.is_none() {
-                            let data = self.slack_client.file_download(file)?;
-                            let blob_ref = self.store_blob(&data)?;
-                            file.blob_ref = Some(blob_ref.as_str().to_string());
-                        }
-                    }
-                    if latest_ts
-                        .as_ref()
-                        .map(|current| slack_ts_value(&message.ts) > slack_ts_value(current))
-                        .unwrap_or(true)
-                    {
-                        latest_ts = Some(message.ts.clone());
-                    }
-                    match self.ingest_draft(slack_adapter.map_message(&message))? {
+                for message in page.messages {
+                    let thread_root = thread_root_ts(&message).map(str::to_owned);
+                    match self.ingest_slack_message(
+                        &slack_adapter,
+                        &self.slack_client,
+                        channel_id,
+                        message,
+                        &mut latest_ts,
+                    )? {
                         IngestResult::Ingested { .. } => slack_ingested += 1,
                         IngestResult::Duplicate { .. } => duplicates += 1,
                         _ => {}
+                    }
+
+                    if let Some(thread_ts) = thread_root {
+                        let replies = self
+                            .slack_replies_client
+                            .conversations_replies(channel_id, &thread_ts)?;
+                        for reply in replies
+                            .into_iter()
+                            .filter(|reply| reply.ts != thread_ts)
+                        {
+                            match self.ingest_slack_message(
+                                &slack_adapter,
+                                &self.slack_replies_client,
+                                channel_id,
+                                reply,
+                                &mut latest_ts,
+                            )? {
+                                IngestResult::Ingested { .. } => slack_ingested += 1,
+                                IngestResult::Duplicate { .. } => duplicates += 1,
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 if page.has_more {
@@ -336,9 +374,9 @@ impl AppService {
             });
             let new_revisions = revisions_after_cursor(revisions, last_revision.as_deref(), should_reset);
 
-            if new_revisions.is_empty() {
+            let Some(captured_revision) = latest_revision_to_capture(&new_revisions).cloned() else {
                 continue;
-            }
+            };
 
             let meta = self.google_client.get_presentation_meta(presentation_id)?;
             let presentation = self.google_client.get_presentation(presentation_id)?;
@@ -353,19 +391,19 @@ impl AppService {
                 .into_iter()
                 .collect::<Vec<_>>();
 
-            let mut latest_revision_id = None;
-            for revision in new_revisions {
-                latest_revision_id = Some(revision.revision_id.clone());
-                match self.ingest_draft(google_adapter.map_revision(&revision, &meta, Some(native_blob.clone()), rendered_blobs.clone()))? {
-                    IngestResult::Ingested { .. } => google_ingested += 1,
-                    IngestResult::Duplicate { .. } => duplicates += 1,
-                    _ => {}
-                }
+            match self.ingest_draft(google_adapter.map_revision(
+                &captured_revision,
+                &meta,
+                Some(native_blob),
+                rendered_blobs,
+            ))? {
+                IngestResult::Ingested { .. } => google_ingested += 1,
+                IngestResult::Duplicate { .. } => duplicates += 1,
+                _ => {}
             }
 
-            if let Some(revision_id) = latest_revision_id {
-                self.persistence_lock()?.set_state(&cursor_key, &revision_id)?;
-            }
+            self.persistence_lock()?
+                .set_state(&cursor_key, &captured_revision.revision_id)?;
         }
 
         match self.ingest_draft(google_adapter.heartbeat())? {
@@ -417,15 +455,14 @@ impl AppService {
             .as_ref()
             .map(|analyzer| format!("{}+continuation-v1", analyzer.model_name()))
             .unwrap_or_else(|| "heuristic-fallback+continuation-v1".to_string());
-        let needs_analysis = self.config.google.presentation_ids.iter().any(|presentation_id| {
+        let mut needs_analysis = false;
+        for presentation_id in &self.config.google.presentation_ids {
             let Some(_observation) = slide_obs_by_presentation.get(presentation_id) else {
-                return false;
+                continue;
             };
-            let Ok(presentation) = self.google_client.get_presentation(presentation_id) else {
-                return false;
-            };
+            let presentation = self.google_client.get_presentation(presentation_id)?;
 
-            presentation
+            if presentation
                 .slides
                 .iter()
                 .take(self.config.slide_analysis_limit)
@@ -434,7 +471,11 @@ impl AppService {
                     Some(_) => false,
                     None => true,
                 })
-        });
+            {
+                needs_analysis = true;
+                break;
+            }
+        }
 
         // --- Slide Analysis + Notion write-back ---
         let mut slide_analyses = 0usize;
@@ -596,8 +637,9 @@ impl AppService {
 
             for result in &analysis_results {
                 let record = crate::slide_analysis::SlideAnalysisProjector::build_supplemental(result);
-                core.add_supplemental(record)
+                core.add_supplemental(record.clone())
                     .map_err(|err| SelfHostError::Ingestion(err.to_string()))?;
+                self.persistence_lock()?.persist_supplemental(&record)?;
             }
 
             for result in &analysis_results {
@@ -942,7 +984,10 @@ impl AppService {
                 .get(id)
                 .cloned()
                 .ok_or_else(|| SelfHostError::Ingestion(format!("observation {id} missing after append")))?;
-            self.persistence_lock()?.persist_observation(&observation)?;
+            if let Err(err) = self.persistence_lock()?.persist_observation(&observation) {
+                core.lake.rollback_last_append(id);
+                return Err(SelfHostError::Persistence(err));
+            }
         }
 
         match &result {
@@ -957,6 +1002,32 @@ impl AppService {
         let blob_ref = core.blobs.put(data);
         self.persistence_lock()?.persist_blob(data)?;
         Ok(blob_ref)
+    }
+
+    fn ingest_slack_message(
+        &self,
+        slack_adapter: &SlackAdapter<HttpSlackClient>,
+        file_client: &HttpSlackClient,
+        channel_id: &str,
+        mut message: crate::adapter::slack::client::SlackMessage,
+        latest_ts: &mut Option<String>,
+    ) -> Result<IngestResult, SelfHostError> {
+        message.channel_id = channel_id.to_string();
+        for file in &mut message.files {
+            if file.blob_ref.is_none() {
+                let data = file_client.file_download(file)?;
+                let blob_ref = self.store_blob(&data)?;
+                file.blob_ref = Some(blob_ref.as_str().to_string());
+            }
+        }
+        if latest_ts
+            .as_ref()
+            .map(|current| slack_ts_value(&message.ts) > slack_ts_value(current))
+            .unwrap_or(true)
+        {
+            *latest_ts = Some(message.ts.clone());
+        }
+        self.ingest_draft(slack_adapter.map_message(&message))
     }
 
     fn extract_student_profile(
@@ -1098,6 +1169,25 @@ fn revisions_after_cursor(
             }
         })
         .collect()
+}
+
+fn latest_revision_to_capture(
+    revisions: &[crate::adapter::gslides::client::SlideRevision],
+) -> Option<&crate::adapter::gslides::client::SlideRevision> {
+    // The Google APIs used here only let us fetch the current presentation state,
+    // so capturing anything older than the newest unseen revision would falsely
+    // attach latest content to historical revision IDs.
+    revisions.last()
+}
+
+fn thread_root_ts(
+    message: &crate::adapter::slack::client::SlackMessage,
+) -> Option<&str> {
+    if message.reply_count == 0 {
+        return None;
+    }
+
+    Some(message.thread_ts.as_deref().unwrap_or(message.ts.as_str()))
 }
 
 fn non_empty_state(value: Option<String>) -> Option<String> {
@@ -1356,13 +1446,24 @@ fn analysis_record_is_rich(record: &crate::domain::SupplementalRecord) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use crate::adapter::slack::client::{SlackMessage, SlackMessageType};
+    use crate::adapter::traits::ObservationDraft;
+    use crate::domain::supplemental::InputAnchorSet;
+    use crate::adapter::gslides::client::SlideRevision;
     use chrono::Utc;
 
-    use super::{AppCore, SelfHostError, non_empty_state};
+    use super::{AppCore, AppService, SelfHostError, latest_revision_to_capture, non_empty_state, thread_root_ts};
     use crate::domain::{
-        AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Observation, ObserverRef,
-        SchemaRef, SemVer,
+        ActorRef, AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Mutability,
+        Observation, ObserverRef, SchemaRef, SemVer, SupplementalId, SupplementalRecord,
     };
+    use crate::self_host::config::{GoogleConfig, SelfHostConfig, SlackConfig};
+    use crate::self_host::google::HttpGoogleSlidesClient;
+    use crate::self_host::persistence::SqlitePersistence;
+    use crate::self_host::slack::HttpSlackClient;
 
     #[test]
     fn non_empty_state_filters_blank_values() {
@@ -1404,7 +1505,209 @@ mod tests {
             observation("two", "dup-key"),
         ];
 
-        let err = AppCore::new(observations, vec![]).unwrap_err();
+        let err = AppCore::new(observations, vec![], vec![]).unwrap_err();
         assert!(matches!(err, SelfHostError::Ingestion(_)));
+    }
+
+    #[test]
+    fn latest_revision_to_capture_prefers_newest_revision() {
+        let revisions = vec![
+            SlideRevision {
+                presentation_id: "pres-1".into(),
+                revision_id: "rev-1".into(),
+                modified_time: chrono::DateTime::parse_from_rfc3339("2026-03-24T10:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+                last_modifying_user: None,
+            },
+            SlideRevision {
+                presentation_id: "pres-1".into(),
+                revision_id: "rev-2".into(),
+                modified_time: chrono::DateTime::parse_from_rfc3339("2026-03-24T11:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+                last_modifying_user: None,
+            },
+        ];
+
+        assert_eq!(
+            latest_revision_to_capture(&revisions)
+                .map(|revision| revision.revision_id.as_str()),
+            Some("rev-2")
+        );
+    }
+
+    fn test_config(db: PathBuf, blobs: PathBuf) -> SelfHostConfig {
+        SelfHostConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            database_path: db,
+            blob_dir: blobs,
+            poll_interval: std::time::Duration::from_secs(300),
+            slack: SlackConfig {
+                bot_token: "xoxb-test-token".into(),
+                thread_token: None,
+                channel_ids: vec!["C01ABC".into()],
+            },
+            google: GoogleConfig {
+                access_token: Some("ya29.test-token".into()),
+                client_id: None,
+                client_secret: None,
+                refresh_token: None,
+                presentation_ids: vec!["pres123".into()],
+            },
+            slide_analysis_limit: 10,
+            slide_ai: None,
+            notion: None,
+        }
+    }
+
+    #[test]
+    fn thread_root_ts_returns_parent_thread_identifier() {
+        let message = SlackMessage {
+            channel_id: "C01ABC".into(),
+            channel_name: "general".into(),
+            ts: "1234567890.123456".into(),
+            thread_ts: None,
+            user_id: "U1".into(),
+            user_name: "alice".into(),
+            email: None,
+            text: "hello".into(),
+            message_type: SlackMessageType::Message,
+            edited: None,
+            reactions: vec![],
+            files: vec![],
+            reply_count: 2,
+            reply_users_count: 1,
+        };
+
+        assert_eq!(thread_root_ts(&message), Some("1234567890.123456"));
+    }
+
+    #[test]
+    fn ingest_draft_rolls_back_lake_when_persistence_fails() {
+        let root = std::env::temp_dir().join(format!("dokp-self-host-test-{}", uuid::Uuid::now_v7()));
+        let db = root.join("dokp.sqlite3");
+        let blobs = root.join("blobs");
+        let persistence = SqlitePersistence::open(&db, &blobs).unwrap();
+        let persisted_observation = Observation {
+            id: Observation::new_id(),
+            schema: SchemaRef::new("schema:slack-message"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:slack-crawler"),
+            source_system: Some(crate::domain::SourceSystemRef::new("sys:slack")),
+            actor: None,
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            subject: EntityRef::new("message:slack:existing"),
+            target: None,
+            payload: serde_json::json!({"text": "persisted"}),
+            attachments: vec![],
+            published: Utc::now(),
+            recorded_at: Utc::now(),
+            consent: None,
+            idempotency_key: Some(IdempotencyKey::new("slack:C01ABC:dup-ts")),
+            meta: serde_json::json!({}),
+        };
+        persistence.persist_observation(&persisted_observation).unwrap();
+
+        let config = test_config(db.clone(), blobs.clone());
+        let service = AppService {
+            core: Arc::new(Mutex::new(AppCore::new(vec![], vec![], vec![]).unwrap())),
+            persistence: Arc::new(Mutex::new(persistence)),
+            config: Arc::new(config.clone()),
+            slack_client: HttpSlackClient::new(config.slack.bot_token.clone()).unwrap(),
+            slack_replies_client: HttpSlackClient::new(config.slack.bot_token.clone()).unwrap(),
+            google_client: HttpGoogleSlidesClient::new(&config.google).unwrap(),
+            slide_analyzer: None,
+            notion_client: None,
+        };
+
+        let draft = ObservationDraft {
+            schema: SchemaRef::new("schema:slack-message"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:slack-crawler"),
+            source_system: Some(crate::domain::SourceSystemRef::new("sys:slack")),
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            subject: EntityRef::new("message:slack:new"),
+            target: None,
+            payload: serde_json::json!({
+                "channel_id": "C01ABC",
+                "channel_name": "general",
+                "ts": "dup-ts",
+                "user_id": "U1",
+                "user_name": "alice",
+                "text": "new"
+            }),
+            attachments: vec![],
+            published: Utc::now(),
+            idempotency_key: IdempotencyKey::new("slack:C01ABC:dup-ts"),
+            meta: serde_json::json!({}),
+        };
+
+        let err = service.ingest_draft(draft).unwrap_err();
+        assert!(matches!(err, SelfHostError::Persistence(_)));
+        assert_eq!(service.core_lock().unwrap().lake.len(), 0);
+        assert_eq!(service.persistence_lock().unwrap().load_observations().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_core_restores_persisted_slide_analysis_supplemental() {
+        let observation = Observation {
+            id: Observation::new_id(),
+            schema: SchemaRef::new("schema:workspace-object-snapshot"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:gslides-crawler"),
+            source_system: Some(crate::domain::SourceSystemRef::new("sys:google-slides")),
+            actor: None,
+            authority_model: AuthorityModel::SourceAuthoritative,
+            capture_model: CaptureModel::Snapshot,
+            subject: EntityRef::new("document:gslides:pres123"),
+            target: None,
+            payload: serde_json::json!({
+                "title": "自己紹介",
+                "artifact": { "sourceObjectId": "pres123" },
+                "relations": {
+                    "owner": "tanaka@example.jp",
+                    "editors": ["tanaka@example.jp"]
+                }
+            }),
+            attachments: vec![],
+            published: Utc::now(),
+            recorded_at: Utc::now(),
+            consent: None,
+            idempotency_key: Some(IdempotencyKey::new("gslides:pres123:rev:r1")),
+            meta: serde_json::json!({}),
+        };
+        let supplemental = SupplementalRecord {
+            id: SupplementalId::new("sup:slide-analysis:pres123:slide-1"),
+            kind: "slide-analysis".into(),
+            derived_from: InputAnchorSet {
+                observations: vec![observation.id.clone()],
+                blobs: vec![],
+                supplementals: vec![],
+            },
+            payload: serde_json::json!({
+                "name": "田中太郎",
+                "bio_text": "私は田中太郎です",
+                "source_slide_object_id": "slide-1",
+                "source_document_id": "document:gslides:pres123#slide:slide-1"
+            }),
+            created_by: ActorRef::new("actor:test"),
+            created_at: Utc::now(),
+            mutability: Mutability::ManagedCache,
+            record_version: Some("1".into()),
+            model_version: Some("fixture".into()),
+            consent_metadata: None,
+            lineage: None,
+        };
+
+        let core = AppCore::new(vec![observation], vec![], vec![supplemental]).unwrap();
+        assert_eq!(
+            core.snapshot.person_page.profiles[0].self_intro_text.as_deref(),
+            Some("私は田中太郎です")
+        );
     }
 }

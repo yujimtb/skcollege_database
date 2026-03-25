@@ -85,6 +85,7 @@
 `.env`、OAuth client JSON、SQLite、blob directory はローカル専用です。公開リポジトリには含めません。
 
 - `DOKP_SLACK_BOT_TOKEN`
+- `DOKP_SLACK_THREAD_TOKEN` (任意。thread reply 読み取り用の token を分けたい場合)
 - `DOKP_SLACK_CHANNEL_IDS`
 - `DOKP_GOOGLE_PRESENTATION_IDS`
 - `DOKP_GOOGLE_ACCESS_TOKEN`
@@ -137,10 +138,14 @@ cargo run --bin dokp-selfhost
 - 永続化は SQLite + ローカル blob directory を使います
 - 既定の runtime state は `./data/` 配下に作られ、このディレクトリは Git では無視されます
 - SQLite にある観測が重複していた場合、bootstrap は黙って捨てずにエラーとして扱います
+- 観測 append 後の SQLite 永続化が失敗した場合、Lake 側の append も rollback して RAM/DB の不整合を残しません
+- slide-analysis の supplemental cache も SQLite に保存され、bootstrap 後も person detail に復元されます
 - API は internal-only 前提で、現状は簡易構成のため認証を入れていません
 - person detail では `Filtering-before-Exposure` により `identities` を非表示にしています
 - identity / person-page の時刻は壁時計ではなく入力観測・補助レコードから導出し、replay の決定性を保ちます
 - slide-analysis と Notion write-back の失敗は同期中に握り潰さず、その場で返します
+- Google Slides で未取得 revision が複数ある場合、self-host は取得可能な **最新 revision の正しい snapshot** だけを materialize し、古い revision に最新内容を誤って付与しません
+- Slack sync は thread parent を見つけたとき `conversations.replies` も辿り、thread reply を個別 observation として取り込みます
 - 秘密鍵・アクセストークンを一度でもローカルで使った場合は、公開前に新しい値へローテーションしてください
 
 ## Reading Order

@@ -18,6 +18,7 @@ pub struct SelfHostConfig {
 #[derive(Debug, Clone)]
 pub struct SlackConfig {
     pub bot_token: String,
+    pub thread_token: Option<String>,
     pub channel_ids: Vec<String>,
 }
 
@@ -66,6 +67,9 @@ impl SelfHostConfig {
 
         let slack = SlackConfig {
             bot_token: required_env("DOKP_SLACK_BOT_TOKEN")?,
+            thread_token: env::var("DOKP_SLACK_THREAD_TOKEN")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             channel_ids: parse_csv_env("DOKP_SLACK_CHANNEL_IDS", true)?,
         };
 

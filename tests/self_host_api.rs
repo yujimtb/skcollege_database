@@ -88,6 +88,7 @@ fn test_config(db: PathBuf, blobs: PathBuf) -> SelfHostConfig {
         poll_interval: std::time::Duration::from_secs(300),
         slack: SlackConfig {
             bot_token: "xoxb-test-token".into(),
+            thread_token: None,
             channel_ids: vec!["C01ABC".into()],
         },
         google: GoogleConfig {

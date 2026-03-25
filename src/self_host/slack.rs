@@ -144,27 +144,41 @@ impl SlackClient for HttpSlackClient {
         channel_id: &str,
         thread_ts: &str,
     ) -> Result<Vec<SlackMessage>, AdapterError> {
-        let response: ConversationsHistoryResponse = self.get_json(
-            "conversations.replies",
-            &[("channel", channel_id), ("ts", thread_ts)],
-        )?;
-        if !response.ok {
-            return Err(map_slack_error(response.error));
+        let channel_name = self.conversation_name(channel_id)?;
+        let mut messages = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut query = vec![("channel", channel_id), ("ts", thread_ts)];
+            if let Some(cursor_value) = cursor.as_deref() {
+                query.push(("cursor", cursor_value));
+            }
+            let response: ConversationsHistoryResponse =
+                self.get_json("conversations.replies", &query)?;
+            if !response.ok {
+                return Err(map_slack_error(response.error));
+            }
+
+            let user_ids: Vec<String> = response
+                .messages
+                .iter()
+                .filter_map(|message| message.user.clone())
+                .collect();
+            let users = self.user_profiles(&user_ids)?;
+            messages.extend(
+                response
+                    .messages
+                    .into_iter()
+                    .map(|message| to_slack_message(message, &channel_name, &users)),
+            );
+
+            cursor = response.response_metadata.and_then(|meta| meta.next_cursor);
+            if cursor.as_deref().is_none_or(str::is_empty) {
+                break;
+            }
         }
 
-        let channel_name = self.conversation_name(channel_id)?;
-        let user_ids: Vec<String> = response
-            .messages
-            .iter()
-            .filter_map(|message| message.user.clone())
-            .collect();
-        let users = self.user_profiles(&user_ids)?;
-
-        Ok(response
-            .messages
-            .into_iter()
-            .map(|message| to_slack_message(message, &channel_name, &users))
-            .collect())
+        Ok(messages)
     }
 
     fn conversations_info(

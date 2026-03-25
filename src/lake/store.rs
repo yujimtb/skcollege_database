@@ -47,6 +47,23 @@ impl LakeStore {
         Ok(id)
     }
 
+    /// Roll back the most recent append if it matches the provided id.
+    ///
+    /// This is only intended for failure paths where an append has not yet been
+    /// durably committed outside the process.
+    pub fn rollback_last_append(&mut self, id: &ObservationId) -> Option<Observation> {
+        let last = self.observations.last()?;
+        if last.id != *id {
+            return None;
+        }
+
+        let observation = self.observations.pop()?;
+        if let Some(key) = &observation.idempotency_key {
+            self.dedup_index.remove(key.as_str());
+        }
+        Some(observation)
+    }
+
     /// Get a single observation by id.
     pub fn get(&self, id: &ObservationId) -> Option<&Observation> {
         self.observations.iter().find(|o| o.id == *id)
@@ -173,5 +190,17 @@ mod tests {
         assert_eq!(hits.len(), 1);
         let misses = lake.by_schema(&SchemaRef::new("schema:other"));
         assert!(misses.is_empty());
+    }
+
+    #[test]
+    fn rollback_last_append_removes_latest_observation() {
+        let mut lake = LakeStore::new();
+        let obs = sample_obs("rollback");
+        let id = obs.id.clone();
+        lake.append(obs).unwrap();
+
+        let rolled_back = lake.rollback_last_append(&id);
+        assert!(rolled_back.is_some());
+        assert!(lake.is_empty());
     }
 }

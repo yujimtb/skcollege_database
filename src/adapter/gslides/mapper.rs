@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::adapter::error::AdapterError;
 use crate::adapter::config::AdapterConfig;
 use crate::adapter::heartbeat::heartbeat_draft;
 use crate::adapter::idempotency::gslides_revision_key;
@@ -144,33 +145,10 @@ impl<C: GoogleSlidesClient> GoogleSlidesAdapter<C> {
 }
 
 impl<C: GoogleSlidesClient> SourceAdapter for GoogleSlidesAdapter<C> {
-    fn fetch_incremental(&self, cursor: Option<&Cursor>) -> FetchResult {
-        let page_token = cursor.map(|c| c.value.as_str());
-        match self
-            .client
-            .list_revisions("default", page_token)
-        {
-            Ok(page) => {
-                let items: Vec<RawData> = page
-                    .revisions
-                    .iter()
-                    .map(|r| RawData {
-                        data: serde_json::to_value(r).unwrap_or_default(),
-                        blobs: vec![],
-                    })
-                    .collect();
-                let next_cursor = page.next_page_token.map(|t| Cursor {
-                    value: t,
-                    updated_at: Utc::now(),
-                });
-                FetchResult::Ok {
-                    items,
-                    next_cursor,
-                    has_more: false,
-                }
-            }
-            Err(e) => FetchResult::Error(e),
-        }
+    fn fetch_incremental(&self, _cursor: Option<&Cursor>) -> FetchResult {
+        FetchResult::Error(AdapterError::Other(
+            "GoogleSlidesAdapter::fetch_incremental requires an explicit presentation ID; use GoogleSlidesClient::list_revisions".into(),
+        ))
     }
 
     fn fetch_snapshot(&self, target_id: &str) -> FetchResult {
@@ -236,6 +214,7 @@ impl<C: GoogleSlidesClient> SourceAdapter for GoogleSlidesAdapter<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::error::AdapterError;
     use crate::adapter::config::*;
     use std::time::Duration;
 
@@ -365,13 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_incremental_via_fixture() {
+    fn fetch_incremental_requires_explicit_presentation_context() {
         let revs = vec![sample_revision()];
         let client = FixtureGoogleSlidesClient::new().with_revisions(revs);
         let adapter = GoogleSlidesAdapter::new(client, test_config());
 
         match adapter.fetch_incremental(None) {
-            FetchResult::Ok { items, .. } => assert_eq!(items.len(), 1),
+            FetchResult::Error(AdapterError::Other(message)) => {
+                assert!(message.contains("explicit presentation ID"));
+            }
+            FetchResult::Ok { .. } => panic!("expected unsupported fetch_incremental error"),
             FetchResult::Error(e) => panic!("unexpected error: {e}"),
         }
     }

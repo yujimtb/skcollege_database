@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 
-use crate::domain::{BlobRef, Observation};
+use crate::domain::{BlobRef, Observation, SupplementalRecord};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -51,6 +51,20 @@ impl SqlitePersistence {
         Ok(observations)
     }
 
+    pub fn load_supplementals(&self) -> Result<Vec<SupplementalRecord>, PersistenceError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT supplemental_json FROM supplementals ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        let mut supplementals = Vec::new();
+        for row in rows {
+            let json = row?;
+            supplementals.push(serde_json::from_str::<SupplementalRecord>(&json)?);
+        }
+        Ok(supplementals)
+    }
+
     pub fn persist_observation(&self, observation: &Observation) -> Result<(), PersistenceError> {
         let json = serde_json::to_string(observation)?;
         self.conn.execute(
@@ -59,6 +73,20 @@ impl SqlitePersistence {
                 observation.id.as_str(),
                 observation.idempotency_key.as_ref().map(|value| value.as_str()),
                 observation.recorded_at.to_rfc3339(),
+                json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn persist_supplemental(&self, record: &SupplementalRecord) -> Result<(), PersistenceError> {
+        let json = serde_json::to_string(record)?;
+        self.conn.execute(
+            "INSERT INTO supplementals (id, created_at, supplemental_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at, supplemental_json = excluded.supplemental_json",
+            params![
+                record.id.as_str(),
+                record.created_at.to_rfc3339(),
                 json,
             ],
         )?;
@@ -129,6 +157,12 @@ impl SqlitePersistence {
                 blob_ref TEXT PRIMARY KEY,
                 file_path TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS supplementals (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                supplemental_json TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -141,8 +175,9 @@ mod tests {
     use chrono::Utc;
 
     use crate::domain::{
-        AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Observation, ObserverRef,
-        SchemaRef, SemVer,
+        supplemental::InputAnchorSet, ActorRef, AuthorityModel, CaptureModel, EntityRef,
+        IdempotencyKey, Mutability, Observation, ObserverRef, SchemaRef, SemVer, SupplementalId,
+        SupplementalRecord,
     };
 
     fn sample_observation() -> Observation {
@@ -183,6 +218,26 @@ mod tests {
         let _ = fs::remove_dir_all(tmp);
     }
 
+    fn sample_supplemental(observation_id: &crate::domain::ObservationId) -> SupplementalRecord {
+        SupplementalRecord {
+            id: SupplementalId::new("sup:test"),
+            kind: "slide-analysis".into(),
+            derived_from: InputAnchorSet {
+                observations: vec![observation_id.clone()],
+                blobs: vec![],
+                supplementals: vec![],
+            },
+            payload: serde_json::json!({"bio_text": "hello"}),
+            created_by: ActorRef::new("actor:test"),
+            created_at: Utc::now(),
+            mutability: Mutability::ManagedCache,
+            record_version: Some("1".into()),
+            model_version: Some("fixture".into()),
+            consent_metadata: None,
+            lineage: None,
+        }
+    }
+
     #[test]
     fn duplicate_persist_observation_surfaces_constraint_error() {
         let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
@@ -194,6 +249,26 @@ mod tests {
         store.persist_observation(&observation).unwrap();
         let err = store.persist_observation(&observation).unwrap_err();
         assert!(matches!(err, PersistenceError::Sqlite(_)));
+
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn persist_and_reload_supplemental() {
+        let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
+        let db = tmp.join("test.sqlite3");
+        let blob_dir = tmp.join("blobs");
+        let store = SqlitePersistence::open(&db, &blob_dir).unwrap();
+        let observation = sample_observation();
+        let supplemental = sample_supplemental(&observation.id);
+
+        store.persist_observation(&observation).unwrap();
+        store.persist_supplemental(&supplemental).unwrap();
+        let supplementals = store.load_supplementals().unwrap();
+
+        assert_eq!(supplementals.len(), 1);
+        assert_eq!(supplementals[0].id, supplemental.id);
+        assert_eq!(supplementals[0].kind, "slide-analysis");
 
         let _ = fs::remove_dir_all(tmp);
     }

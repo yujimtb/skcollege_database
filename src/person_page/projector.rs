@@ -148,13 +148,6 @@ impl PersonPageProjector {
                 .or(profile.generated_email.as_deref())
                 .and_then(|value| identifier_map.get(value))
                 .cloned()
-                .or_else(|| {
-                    profile
-                        .source_document_id
-                        .as_deref()
-                        .and_then(|value| identifier_map.get(value))
-                        .cloned()
-                })
                 .or_else(|| Self::person_id_from_slide_observation(source_observation, identifier_map));
             let Some(person_id) = person_id else {
                 continue;
@@ -477,10 +470,12 @@ impl PersonPageProjector {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::supplemental::InputAnchorSet;
     use super::*;
     use crate::domain::*;
     use crate::governance::types::ConfidenceLevel;
     use crate::identity::types::*;
+    use crate::slide_analysis::types::StudentProfile;
 
     fn slack_obs(user_id: &str, email: &str, text: &str, channel: &str, key: &str) -> Observation {
         Observation {
@@ -690,5 +685,62 @@ mod tests {
         let output = PersonPageProjector::project(&identity, &[observation], &[]);
         assert_eq!(output.messages.len(), 1);
         assert_eq!(output.messages[0].channel, "general");
+    }
+
+    #[test]
+    fn frontend_profile_links_via_source_observation_not_document_identifier() {
+        let identity = sample_identity();
+        let observation = gslides_obs(&["tanaka@example.jp"], "tanaka@example.jp", "g1");
+        let supplemental = SupplementalRecord {
+            id: SupplementalId::new("sup:slide-analysis:g1"),
+            kind: "slide-analysis".into(),
+            derived_from: InputAnchorSet {
+                observations: vec![observation.id.clone()],
+                blobs: vec![],
+                supplementals: vec![],
+            },
+            payload: serde_json::to_value(StudentProfile {
+                email: None,
+                generated_email: None,
+                name: "田中太郎".into(),
+                bio_text: Some("自己紹介".into()),
+                profile_pic: None,
+                gallery_images: vec![],
+                properties: Default::default(),
+                attributes: vec![],
+                source_slide_object_id: Some("slide-1".into()),
+                source_document_id: Some("document:gslides:g1#slide:slide-1".into()),
+                source_canonical_uri: None,
+                thumbnail_blob_ref: None,
+                thumbnail_url: Some("https://example.com/thumb.png".into()),
+                companion_to_slide_object_id: None,
+            })
+            .unwrap(),
+            created_by: ActorRef::new("actor:test"),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-03-24T12:00:00Z")
+                .unwrap()
+                .to_utc(),
+            mutability: Mutability::ManagedCache,
+            record_version: Some("1".into()),
+            model_version: Some("fixture".into()),
+            consent_metadata: None,
+            lineage: None,
+        };
+
+        let output = PersonPageProjector::project(&identity, &[observation], &[&supplemental]);
+        assert_eq!(output.profiles.len(), 1);
+        assert_eq!(
+            output.profiles[0]
+                .frontend_profile
+                .as_ref()
+                .map(|profile| profile.source_document_id.as_str()),
+            Some("document:gslides:g1#slide:slide-1")
+        );
+        assert!(
+            output.profiles[0]
+                .identities
+                .iter()
+                .all(|identity| !identity.external_id.starts_with("document:gslides:"))
+        );
     }
 }

@@ -17,6 +17,7 @@ All findings in this report have now been addressed in code.
 - Items 4-7: fixed API `500` envelope shape, multi-source reconciliation validation, propagation error surfacing, and nested/array filtering.
 - Items 8-13: fixed persistence/no-op writes, replay nondeterminism, slide-analysis persistence swallowing, and Notion lookup/header/delete error handling.
 - Items 14-15: fixed panic-prone poisoned mutex handling and bootstrap-time duplicate observation suppression.
+- Follow-up audit fixes: also fixed Google multi-revision snapshot miscapture, ingestion observer/source/schema contract enforcement, slide-analysis document-ID identity pollution, persisted slide-analysis bootstrap restore, analysis-refresh error swallowing, unsupported adapter incremental defaults, Slack thread-reply ingestion, and post-append durability rollback for SQLite failures.
 - Verification after remediation: `cargo build --quiet && cargo test --quiet` passed.
 
 ## High-confidence findings

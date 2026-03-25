@@ -53,18 +53,96 @@ impl IngestionGate<'_> {
         let recorded_at = Utc::now();
 
         // Step 1: Authenticate observer (must be registered).
-        if self.registry.get_observer(&req.observer).is_none() {
+        let Some(observer) = self.registry.get_observer(&req.observer) else {
             return IngestResult::Rejected {
                 class: crate::domain::FailureClass::ValidationFailure,
                 message: format!("Observer {} not registered", req.observer),
             };
-        }
+        };
 
         // Step 2: Resolve source contract — verify schema exists.
-        if self.registry.get_schema(&req.schema).is_none() {
+        let Some(schema) = self.registry.get_schema(&req.schema) else {
             return IngestResult::Rejected {
                 class: crate::domain::FailureClass::ValidationFailure,
                 message: format!("Schema {} not registered", req.schema),
+            };
+        };
+
+        let Some(source_system) = req.source_system.as_ref() else {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!(
+                    "Observer {} requires source system {}",
+                    observer.id, observer.source_system
+                ),
+            };
+        };
+
+        if *source_system != observer.source_system {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!(
+                    "Observer {} is bound to source system {}, not {}",
+                    observer.id, observer.source_system, source_system
+                ),
+            };
+        }
+
+        let observer_allows_schema = observer.schemas.is_empty()
+            || observer
+                .schemas
+                .iter()
+                .any(|schema_ref| schema_ref.as_str() == "*" || *schema_ref == req.schema);
+        if !observer_allows_schema {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!("Observer {} cannot emit schema {}", observer.id, req.schema),
+            };
+        }
+
+        let is_heartbeat = req.schema.as_str() == "schema:observer-heartbeat";
+        let expected_authority = if is_heartbeat {
+            AuthorityModel::LakeAuthoritative
+        } else {
+            observer.authority_model
+        };
+        if req.authority_model != expected_authority {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!(
+                    "Observer {} must use authority model {:?}, not {:?}",
+                    observer.id, expected_authority, req.authority_model
+                ),
+            };
+        }
+
+        let expected_capture = if is_heartbeat {
+            CaptureModel::Event
+        } else {
+            observer.capture_model
+        };
+        if req.capture_model != expected_capture {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!(
+                    "Observer {} must use capture model {:?}, not {:?}",
+                    observer.id, expected_capture, req.capture_model
+                ),
+            };
+        }
+
+        if !schema.source_contracts.is_empty()
+            && !schema
+                .source_contracts
+                .iter()
+                .any(|contract| contract.observer_id == observer.id)
+        {
+            return IngestResult::Rejected {
+                class: crate::domain::FailureClass::ValidationFailure,
+                message: format!(
+                    "Schema {} does not allow observer {}",
+                    req.schema, observer.id
+                ),
             };
         }
 
@@ -271,6 +349,141 @@ mod tests {
         let mut req = valid_request();
         req.schema = SchemaRef::new("schema:nonexistent");
         let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn mismatched_source_system_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.source_system = Some(SourceSystemRef::new("sys:google-slides"));
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn schema_not_authorized_for_observer_rejected() {
+        let mut reg = setup_registry();
+        reg.register_schema(ObservationSchema {
+            id: SchemaRef::new("schema:other"),
+            name: "Other".into(),
+            version: SemVer::new("1.0.0"),
+            subject_type: EntityTypeRef::new("et:message"),
+            target_type: None,
+            payload_schema: serde_json::json!({"type": "object"}),
+            source_contracts: vec![],
+            attachment_config: None,
+            registered_by: None,
+            registered_at: None,
+        })
+        .unwrap();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.schema = SchemaRef::new("schema:other");
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn mismatched_authority_model_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.authority_model = AuthorityModel::SourceAuthoritative;
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn mismatched_capture_model_rejected() {
+        let reg = setup_registry();
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let mut req = valid_request();
+        req.capture_model = CaptureModel::Snapshot;
+        let result = gate.ingest(req);
+        assert!(matches!(result, IngestResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn schema_source_contract_rejected_for_wrong_observer() {
+        let mut reg = RegistryStore::new();
+        reg.register_source_system(SourceSystem {
+            id: SourceSystemRef::new("sys:slack"),
+            name: "Slack".into(),
+            provider: Some("Slack".into()),
+            api_version: Some("v1".into()),
+            source_class: SourceClass::MutableText,
+        })
+        .unwrap();
+        reg.register_observer(Observer {
+            id: ObserverRef::new("obs:slack-crawler"),
+            name: "Slack Crawler".into(),
+            observer_type: ObserverType::Crawler,
+            source_system: SourceSystemRef::new("sys:slack"),
+            adapter_version: SemVer::new("1.0.0"),
+            schemas: vec![SchemaRef::new("schema:slack-message")],
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            owner: "dokp".into(),
+            trust_level: TrustLevel::Automated,
+        })
+        .unwrap();
+        reg.register_schema(ObservationSchema {
+            id: SchemaRef::new("schema:slack-message"),
+            name: "Slack Message".into(),
+            version: SemVer::new("1.0.0"),
+            subject_type: EntityTypeRef::new("et:message"),
+            target_type: None,
+            payload_schema: serde_json::json!({"type": "object"}),
+            source_contracts: vec![SchemaSourceContract {
+                observer_id: ObserverRef::new("obs:other"),
+                adapter_version: SemVer::new("1.0.0"),
+                compatible_range: ">=1.0.0 <2.0.0".into(),
+            }],
+            attachment_config: None,
+            registered_by: None,
+            registered_at: None,
+        })
+        .unwrap();
+
+        let mut lake = LakeStore::new();
+        let blobs = BlobStore::new();
+        let mut gate = IngestionGate {
+            registry: &reg,
+            lake: &mut lake,
+            blobs: &blobs,
+        };
+
+        let result = gate.ingest(valid_request());
         assert!(matches!(result, IngestResult::Rejected { .. }));
     }
 

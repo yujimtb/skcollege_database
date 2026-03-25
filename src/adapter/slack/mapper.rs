@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::adapter::error::AdapterError;
 use crate::adapter::config::AdapterConfig;
 use crate::adapter::heartbeat::heartbeat_draft;
 use crate::adapter::idempotency::*;
@@ -194,33 +195,10 @@ impl<C: SlackClient> SlackAdapter<C> {
 }
 
 impl<C: SlackClient> SourceAdapter for SlackAdapter<C> {
-    fn fetch_incremental(&self, cursor: Option<&Cursor>) -> FetchResult {
-        let oldest = cursor.map(|c| c.value.as_str());
-        match self
-            .client
-            .conversations_history("default", oldest, None, 200)
-        {
-            Ok(page) => {
-                let items: Vec<RawData> = page
-                    .messages
-                    .iter()
-                    .map(|m| RawData {
-                        data: serde_json::to_value(m).unwrap_or_default(),
-                        blobs: vec![],
-                    })
-                    .collect();
-                let next_cursor = page.next_cursor.map(|v| Cursor {
-                    value: v,
-                    updated_at: Utc::now(),
-                });
-                FetchResult::Ok {
-                    items,
-                    next_cursor,
-                    has_more: page.has_more,
-                }
-            }
-            Err(e) => FetchResult::Error(e),
-        }
+    fn fetch_incremental(&self, _cursor: Option<&Cursor>) -> FetchResult {
+        FetchResult::Error(AdapterError::Other(
+            "SlackAdapter::fetch_incremental requires an explicit channel ID; use SlackClient::conversations_history".into(),
+        ))
     }
 
     fn fetch_snapshot(&self, target_id: &str) -> FetchResult {
@@ -284,6 +262,7 @@ fn parse_slack_ts(ts: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::error::AdapterError;
     use crate::adapter::config::*;
     use std::time::Duration;
 
@@ -452,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_incremental_via_fixture() {
+    fn fetch_incremental_requires_explicit_channel_context() {
         let page = SlackHistoryPage {
             messages: vec![sample_message()],
             has_more: false,
@@ -463,12 +442,10 @@ mod tests {
 
         let result = adapter.fetch_incremental(None);
         match result {
-            FetchResult::Ok {
-                items, has_more, ..
-            } => {
-                assert_eq!(items.len(), 1);
-                assert!(!has_more);
+            FetchResult::Error(AdapterError::Other(message)) => {
+                assert!(message.contains("explicit channel ID"));
             }
+            FetchResult::Ok { .. } => panic!("expected unsupported fetch_incremental error"),
             FetchResult::Error(e) => panic!("unexpected error: {e}"),
         }
     }

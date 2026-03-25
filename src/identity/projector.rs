@@ -174,14 +174,6 @@ impl IdentityProjector {
             });
         }
 
-        if let Some(target) = &obs.target {
-            identifiers.push(SourceIdentifier {
-                source: "slide-analysis".into(),
-                identifier_type: IdentifierType::UserId,
-                value: target.as_str().to_string(),
-            });
-        }
-
         if let Some(name) = &display_name {
             identifiers.push(SourceIdentifier {
                 source: "slide-analysis".into(),
@@ -681,5 +673,39 @@ mod tests {
             .iter()
             .any(|pi| pi.identifier_value == "test@example.com");
         assert!(found);
+    }
+
+    #[test]
+    fn slide_analysis_target_is_not_promoted_to_person_identifier() {
+        let observation = Observation {
+            id: Observation::new_id(),
+            schema: SchemaRef::new("schema:slide-analysis-result"),
+            schema_version: SemVer::new("1.0.0"),
+            observer: ObserverRef::new("obs:slide-analysis-projector"),
+            source_system: Some(SourceSystemRef::new("sys:dokp-internal")),
+            actor: None,
+            authority_model: AuthorityModel::LakeAuthoritative,
+            capture_model: CaptureModel::Event,
+            subject: EntityRef::new("person:alice@hlab.college"),
+            target: Some(EntityRef::new("document:gslides:pres123#slide:slide-1")),
+            payload: serde_json::json!({
+                "person_email": "alice@hlab.college",
+                "person_name": "Alice",
+            }),
+            attachments: vec![],
+            published: Utc::now(),
+            recorded_at: Utc::now(),
+            consent: None,
+            idempotency_key: Some(IdempotencyKey::new("slide-analysis:1")),
+            meta: serde_json::json!({}),
+        };
+
+        let output = IdentityProjector::new("1.0.0").project(&[observation]);
+        let identifiers = &output[0].resolved_persons[0].identifiers;
+        assert!(
+            identifiers
+                .iter()
+                .all(|identifier| identifier.value != "document:gslides:pres123#slide:slide-1")
+        );
     }
 }
