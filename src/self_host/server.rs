@@ -1,5 +1,7 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderValue, StatusCode};
+use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,6 +15,7 @@ pub fn build_router(service: AppService) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/admin/sync", post(sync_now))
+        .route("/public/blobs/{blob_hash}", get(public_blob))
         .route("/api/persons", get(list_persons))
         .route("/api/persons/{person_id}", get(person_detail))
         .route("/api/persons/{person_id}/slides", get(person_slides))
@@ -44,6 +47,28 @@ async fn sync_now(State(service): State<AppService>) -> Result<Json<crate::self_
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(report))
+}
+
+async fn public_blob(
+    State(service): State<AppService>,
+    Path(blob_hash): Path<String>,
+) -> Result<Response, ApiError> {
+    let Some(blob_ref) = blob_ref_from_hash(&blob_hash) else {
+        return Err(ApiError::not_found());
+    };
+    let Some(bytes) = service.blob_bytes(&blob_ref)? else {
+        return Err(ApiError::not_found());
+    };
+
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    Ok(response)
 }
 
 async fn list_persons(
@@ -111,6 +136,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            body: ErrorResponse::not_found(),
+        }
+    }
+
     fn internal(detail: String) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -145,5 +177,13 @@ impl From<SelfHostError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+fn blob_ref_from_hash(hash: &str) -> Option<crate::domain::BlobRef> {
+    if hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(crate::domain::BlobRef::new(format!("blob:sha256:{hash}")))
+    } else {
+        None
     }
 }

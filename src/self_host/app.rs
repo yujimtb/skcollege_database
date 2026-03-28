@@ -286,7 +286,10 @@ impl AppService {
             .notion
             .as_ref()
             .map(|nc| {
-                NotionClient::new(NotionConfig::new(&nc.token, &nc.database_id))
+                NotionClient::new(
+                    NotionConfig::new(&nc.token, &nc.database_id)
+                        .with_blob_dir(config.blob_dir.clone()),
+                )
             })
             .transpose()?;
 
@@ -334,7 +337,11 @@ impl AppService {
         limit: usize,
     ) -> Result<Vec<NotionReviewCandidate>, SelfHostError> {
         let core = self.core_lock()?;
-        Ok(ranked_notion_write_candidates_from_snapshot(&core.snapshot, limit)
+        Ok(ranked_notion_write_candidates_from_snapshot(
+            &core.snapshot,
+            limit,
+            self.config.public_base_url.as_deref(),
+        )
             .into_iter()
             .map(|candidate| candidate.preview)
             .collect())
@@ -359,7 +366,11 @@ impl AppService {
         };
         let candidates = {
             let core = self.core_lock()?;
-            ranked_notion_write_candidates_from_snapshot(&core.snapshot, limit)
+            ranked_notion_write_candidates_from_snapshot(
+                &core.snapshot,
+                limit,
+                self.config.public_base_url.as_deref(),
+            )
         };
 
         let notion = self.notion_client.as_ref().ok_or_else(|| {
@@ -806,8 +817,12 @@ impl AppService {
             .iter()
             .filter_map(|person| {
                 let frontend = person.frontend_profile.as_ref()?;
-                let write_record =
-                    notion_write_record_for_person(person, frontend, core.snapshot.built_at)?;
+                let write_record = notion_write_record_for_person(
+                    person,
+                    frontend,
+                    core.snapshot.built_at,
+                    self.config.public_base_url.as_deref(),
+                )?;
                 Some((write_record.entity_id.clone(), write_record))
             })
             .collect::<HashMap<_, _>>()
@@ -1111,6 +1126,11 @@ impl AppService {
         let blob_ref = core.blobs.put(data);
         self.persistence_lock()?.persist_blob(data)?;
         Ok(blob_ref)
+    }
+
+    pub fn blob_bytes(&self, blob_ref: &BlobRef) -> Result<Option<Vec<u8>>, SelfHostError> {
+        let core = self.core_lock()?;
+        Ok(core.blobs.get(blob_ref).map(|bytes| bytes.to_vec()))
     }
 
     fn ingest_slack_message(
@@ -1610,6 +1630,7 @@ fn analysis_record_is_rich(record: &crate::domain::SupplementalRecord) -> bool {
 fn ranked_notion_write_candidates_from_snapshot(
     snapshot: &ProjectionSnapshot,
     limit: usize,
+    public_base_url: Option<&str>,
 ) -> Vec<RankedNotionWriteCandidate> {
     let mut ranked = snapshot
         .person_page
@@ -1622,8 +1643,12 @@ fn ranked_notion_write_candidates_from_snapshot(
                 .iter()
                 .find(|activity| activity.person_id == person.person_id)?;
             let frontend = person.frontend_profile.as_ref()?;
-            let write_record =
-                notion_write_record_for_person(person, frontend, snapshot.built_at)?;
+            let write_record = notion_write_record_for_person(
+                person,
+                frontend,
+                snapshot.built_at,
+                public_base_url,
+            )?;
 
             Some(RankedNotionWriteCandidate {
                 preview: NotionReviewCandidate {
@@ -1670,6 +1695,7 @@ fn notion_write_record_for_person(
     person: &PersonProfile,
     frontend: &FrontendProfile,
     synced_at: DateTime<Utc>,
+    public_base_url: Option<&str>,
 ) -> Option<WriteRecord> {
     let profile = frontend.profile.clone();
     let entity_id = profile
@@ -1681,6 +1707,13 @@ fn notion_write_record_for_person(
     let title = notion_title_for_profile(&profile, frontend);
     let mut payload = serde_json::to_value(profile).ok()?;
     let payload_object = payload.as_object_mut()?;
+    if let Some(stable_thumbnail_url) = notion_thumbnail_url_for_profile(&frontend.profile, public_base_url)
+    {
+        payload_object.insert(
+            "thumbnail_url".to_string(),
+            serde_json::Value::String(stable_thumbnail_url),
+        );
+    }
     payload_object.insert(
         "_lethe".to_string(),
         serde_json::json!({
@@ -1699,6 +1732,53 @@ fn notion_write_record_for_person(
         external_id: None,
     })
 }
+
+fn notion_thumbnail_url_for_profile(
+    profile: &crate::slide_analysis::types::StudentProfile,
+    public_base_url: Option<&str>,
+) -> Option<String> {
+    stable_google_slides_thumbnail_url(profile)
+        .or_else(|| stable_public_blob_url(public_base_url, profile.thumbnail_blob_ref.as_deref()))
+        .or_else(|| profile.thumbnail_url.clone())
+}
+
+fn stable_public_blob_url(public_base_url: Option<&str>, blob_ref: Option<&str>) -> Option<String> {
+    let base_url = public_base_url?;
+    let hash = blob_ref_sha256(blob_ref?)?;
+    Some(format!("{base_url}/public/blobs/{hash}"))
+}
+
+fn stable_google_slides_thumbnail_url(profile: &crate::slide_analysis::types::StudentProfile) -> Option<String> {
+    let (presentation_id, parsed_slide_object_id) =
+        parse_google_slide_document_id(profile.source_document_id.as_deref()?)?;
+    let slide_object_id = profile
+        .source_slide_object_id
+        .as_deref()
+        .unwrap_or(parsed_slide_object_id);
+    Some(format!(
+        "https://docs.google.com/presentation/d/{presentation_id}/export/png?id={presentation_id}&pageid={slide_object_id}"
+    ))
+}
+
+fn parse_google_slide_document_id(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix("document:gslides:")?;
+    let (presentation_id, slide_object_id) = rest.split_once("#slide:")?;
+    if presentation_id.is_empty() || slide_object_id.is_empty() {
+        None
+    } else {
+        Some((presentation_id, slide_object_id))
+    }
+}
+
+fn blob_ref_sha256(blob_ref: &str) -> Option<&str> {
+    let hash = blob_ref.strip_prefix("blob:sha256:")?;
+    if hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(hash)
+    } else {
+        None
+    }
+}
+
 
 fn notion_title_for_profile(
     profile: &crate::slide_analysis::types::StudentProfile,
@@ -2046,6 +2126,7 @@ mod tests {
     fn test_config(db: PathBuf, blobs: PathBuf) -> SelfHostConfig {
         SelfHostConfig {
             bind_addr: "127.0.0.1:0".into(),
+            public_base_url: None,
             database_path: db,
             blob_dir: blobs,
             poll_interval: std::time::Duration::from_secs(300),
@@ -2336,7 +2417,7 @@ mod tests {
             built_at: Utc::now(),
         };
 
-        let ranked = ranked_notion_write_candidates_from_snapshot(&snapshot, 2);
+        let ranked = ranked_notion_write_candidates_from_snapshot(&snapshot, 2, None);
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].preview.entity_id, "a@example.com");
         assert_eq!(ranked[1].preview.entity_id, "b@example.com");
@@ -2363,6 +2444,148 @@ mod tests {
                 .pointer("/_lethe/status")
                 .and_then(|value| value.as_str()),
             Some("Done")
+        );
+    }
+
+    #[test]
+    fn ranked_notion_candidates_prefer_google_export_thumbnail_url() {
+        let snapshot = ProjectionSnapshot {
+            identity: Default::default(),
+            person_page: crate::person_page::types::PersonPageOutput {
+                profiles: vec![crate::person_page::types::PersonProfile {
+                    person_id: EntityRef::new("person:a"),
+                    display_name: "A Person".into(),
+                    self_intro_text: Some("A intro".into()),
+                    self_intro_slide_id: Some("document:gslides:a#slide:1".into()),
+                    self_intro_thumbnail: None,
+                    identities: vec![],
+                    source_count: 1,
+                    last_activity: Some(Utc::now()),
+                    profile_updated_at: Utc::now(),
+                    frontend_profile: Some(crate::person_page::types::FrontendProfile {
+                        source_document_id: "document:gslides:a#slide:1".into(),
+                        source_canonical_uri: Some("https://example.com/a".into()),
+                        thumbnail_ref: None,
+                        thumbnail_url: Some("https://googleusercontent.com/ephemeral".into()),
+                        profile: crate::slide_analysis::types::StudentProfile {
+                            email: Some("a@example.com".into()),
+                            generated_email: None,
+                            name: "A Person".into(),
+                            bio_text: Some("bio".into()),
+                            profile_pic: None,
+                            gallery_images: vec![],
+                            properties: Default::default(),
+                            attributes: vec![],
+                            source_slide_object_id: Some("1".into()),
+                            source_document_id: Some("document:gslides:a#slide:1".into()),
+                            source_canonical_uri: Some("https://example.com/a".into()),
+                            thumbnail_blob_ref: Some(format!("blob:sha256:{}", "a".repeat(64))),
+                            thumbnail_url: Some("https://googleusercontent.com/ephemeral".into()),
+                            companion_to_slide_object_id: None,
+                        },
+                    }),
+                }],
+                slides: vec![],
+                messages: vec![],
+                activities: vec![crate::person_page::types::PersonActivity {
+                    person_id: EntityRef::new("person:a"),
+                    total_slides_related: 1,
+                    total_messages: 0,
+                    first_activity: None,
+                    last_activity: Some(Utc::now()),
+                    active_channels: vec![],
+                }],
+            },
+            built_at: Utc::now(),
+        };
+
+        let ranked = ranked_notion_write_candidates_from_snapshot(
+            &snapshot,
+            1,
+            Some("https://public.example.com/root"),
+        );
+        let expected_url = format!(
+            "https://docs.google.com/presentation/d/{}/export/png?id={}&pageid=1",
+            "a", "a"
+        );
+        assert_eq!(
+            ranked[0]
+                .write_record
+                .payload
+                .get("thumbnail_url")
+                .and_then(|value| value.as_str()),
+            Some(expected_url.as_str())
+        );
+    }
+
+    #[test]
+    fn ranked_notion_candidates_fall_back_to_blob_backed_thumbnail_url_without_slide_identifier() {
+        let snapshot = ProjectionSnapshot {
+            identity: Default::default(),
+            person_page: crate::person_page::types::PersonPageOutput {
+                profiles: vec![crate::person_page::types::PersonProfile {
+                    person_id: EntityRef::new("person:a"),
+                    display_name: "A Person".into(),
+                    self_intro_text: Some("A intro".into()),
+                    self_intro_slide_id: Some("document:gslides:a#slide:1".into()),
+                    self_intro_thumbnail: None,
+                    identities: vec![],
+                    source_count: 1,
+                    last_activity: Some(Utc::now()),
+                    profile_updated_at: Utc::now(),
+                    frontend_profile: Some(crate::person_page::types::FrontendProfile {
+                        source_document_id: "document:gslides:a#slide:1".into(),
+                        source_canonical_uri: Some("https://example.com/a".into()),
+                        thumbnail_ref: None,
+                        thumbnail_url: Some("https://googleusercontent.com/ephemeral".into()),
+                        profile: crate::slide_analysis::types::StudentProfile {
+                            email: Some("a@example.com".into()),
+                            generated_email: None,
+                            name: "A Person".into(),
+                            bio_text: Some("bio".into()),
+                            profile_pic: None,
+                            gallery_images: vec![],
+                            properties: Default::default(),
+                            attributes: vec![],
+                            source_slide_object_id: None,
+                            source_document_id: None,
+                            source_canonical_uri: Some("https://example.com/a".into()),
+                            thumbnail_blob_ref: Some(format!("blob:sha256:{}", "a".repeat(64))),
+                            thumbnail_url: Some("https://googleusercontent.com/ephemeral".into()),
+                            companion_to_slide_object_id: None,
+                        },
+                    }),
+                }],
+                slides: vec![],
+                messages: vec![],
+                activities: vec![crate::person_page::types::PersonActivity {
+                    person_id: EntityRef::new("person:a"),
+                    total_slides_related: 1,
+                    total_messages: 0,
+                    first_activity: None,
+                    last_activity: Some(Utc::now()),
+                    active_channels: vec![],
+                }],
+            },
+            built_at: Utc::now(),
+        };
+
+        let ranked = ranked_notion_write_candidates_from_snapshot(
+            &snapshot,
+            1,
+            Some("https://public.example.com/root"),
+        );
+        let expected_url = format!(
+            "https://public.example.com/root/public/blobs/{}",
+            "a".repeat(64)
+        );
+        assert_eq!(
+            ranked[0]
+                .write_record
+                .payload
+                .get("thumbnail_url")
+                .and_then(|value| value.as_str()),
+            Some(expected_url.as_str())
         );
     }
 

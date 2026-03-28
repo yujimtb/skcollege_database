@@ -5,6 +5,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct SelfHostConfig {
     pub bind_addr: String,
+    pub public_base_url: Option<String>,
     pub database_path: PathBuf,
     pub blob_dir: PathBuf,
     pub poll_interval: Duration,
@@ -61,6 +62,11 @@ impl SelfHostConfig {
         let _ = dotenvy::dotenv();
 
         let bind_addr = env::var("LETHE_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        let public_base_url = env::var("LETHE_PUBLIC_BASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|value| normalize_public_base_url("LETHE_PUBLIC_BASE_URL", value))
+            .transpose()?;
         let database_path =
             PathBuf::from(env::var("LETHE_DATABASE_PATH").unwrap_or_else(|_| "./data/lethe.sqlite3".to_string()));
         let blob_dir =
@@ -113,6 +119,7 @@ impl SelfHostConfig {
 
         Ok(Self {
             bind_addr,
+            public_base_url,
             database_path,
             blob_dir,
             poll_interval,
@@ -136,6 +143,18 @@ fn parse_u64_env(name: &'static str, default: u64) -> Result<u64, ConfigError> {
             message: err.to_string(),
         }),
         Err(_) => Ok(default),
+    }
+}
+
+fn normalize_public_base_url(name: &'static str, raw: String) -> Result<String, ConfigError> {
+    let normalized = raw.trim().trim_end_matches('/').to_string();
+    if normalized.starts_with("http://") || normalized.starts_with("https://") {
+        Ok(normalized)
+    } else {
+        Err(ConfigError::InvalidEnv {
+            name,
+            message: "must start with http:// or https://".to_string(),
+        })
     }
 }
 
@@ -172,6 +191,21 @@ mod tests {
         }
         let values = parse_csv_env("LETHE_SLACK_CHANNEL_IDS", true).unwrap();
         assert_eq!(values, vec!["C1", "C2", "C3"]);
+    }
+
+    #[test]
+    fn normalize_public_base_url_trims_trailing_slash() {
+        let normalized =
+            normalize_public_base_url("LETHE_PUBLIC_BASE_URL", "https://example.com/base/".into())
+                .unwrap();
+        assert_eq!(normalized, "https://example.com/base");
+    }
+
+    #[test]
+    fn normalize_public_base_url_rejects_non_http() {
+        let err = normalize_public_base_url("LETHE_PUBLIC_BASE_URL", "ftp://example.com".into())
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidEnv { .. }));
     }
 }
 

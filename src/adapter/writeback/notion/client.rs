@@ -4,9 +4,12 @@
 //! algorithm, page property sync, and content block rendering.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use reqwest::blocking::Client;
+use reqwest::blocking::multipart::{Form, Part};
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::adapter::error::AdapterError;
@@ -25,6 +28,8 @@ pub struct NotionConfig {
     pub token: String,
     /// Target database ID for student directory pages.
     pub database_id: String,
+    /// Local blob directory used to source Notion file uploads.
+    pub blob_dir: Option<PathBuf>,
     /// Notion API version header.
     pub api_version: String,
 }
@@ -34,8 +39,14 @@ impl NotionConfig {
         Self {
             token: token.into(),
             database_id: database_id.into(),
+            blob_dir: None,
             api_version: "2022-06-28".into(),
         }
+    }
+
+    pub fn with_blob_dir(mut self, blob_dir: impl Into<PathBuf>) -> Self {
+        self.blob_dir = Some(blob_dir.into());
+        self
     }
 }
 
@@ -77,6 +88,7 @@ impl DatabaseSchema {
 
 impl NotionClient {
     const BASE_URL: &'static str = "https://api.notion.com/v1";
+    const FILE_UPLOAD_API_VERSION: &'static str = "2026-03-11";
 
     pub fn new(config: NotionConfig) -> Result<Self, AdapterError> {
         let http = Client::builder()
@@ -88,7 +100,7 @@ impl NotionClient {
         Ok(Self { http, config, schema })
     }
 
-    fn headers(&self) -> Result<HeaderMap, AdapterError> {
+    fn auth_headers_for_version(&self, api_version: &str) -> Result<HeaderMap, AdapterError> {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -97,10 +109,9 @@ impl NotionClient {
                     message: format!("invalid Notion bearer token header: {err}"),
                 })?,
         );
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "Notion-Version",
-            HeaderValue::from_str(&self.config.api_version)
+            HeaderValue::from_str(api_version)
                 .map_err(|err| AdapterError::Other(format!(
                     "invalid Notion-Version header: {err}"
                 )))?,
@@ -108,12 +119,28 @@ impl NotionClient {
         Ok(headers)
     }
 
+    fn headers_for_version(&self, api_version: &str) -> Result<HeaderMap, AdapterError> {
+        let mut headers = self.auth_headers_for_version(api_version)?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Ok(headers)
+    }
+
     /// Low-level API call.
-    fn api_call<T: for<'de> Deserialize<'de>>(
+    fn api_call<T: DeserializeOwned>(
         &self,
         method: &str,
         endpoint: &str,
         body: Option<&serde_json::Value>,
+    ) -> Result<T, AdapterError> {
+        self.api_call_with_version(method, endpoint, body, &self.config.api_version)
+    }
+
+    fn api_call_with_version<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        endpoint: &str,
+        body: Option<&serde_json::Value>,
+        api_version: &str,
     ) -> Result<T, AdapterError> {
         let url = format!("{}{}", Self::BASE_URL, endpoint);
         let request = match method {
@@ -124,7 +151,7 @@ impl NotionClient {
             _ => return Err(AdapterError::Other(format!("unsupported method: {method}"))),
         };
 
-        let request = request.headers(self.headers()?);
+        let request = request.headers(self.headers_for_version(api_version)?);
         let request = if let Some(body) = body {
             request.json(body)
         } else {
@@ -135,6 +162,10 @@ impl NotionClient {
             message: err.to_string(),
         })?;
 
+        Self::decode_response(response)
+    }
+
+    fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T, AdapterError> {
         let status = response.status();
         if status.as_u16() == 429 {
             return Err(AdapterError::RateLimited {
@@ -277,9 +308,102 @@ impl NotionClient {
         children: &[serde_json::Value],
     ) -> Result<Vec<NotionBlock>, AdapterError> {
         let payload = serde_json::json!({ "children": children });
-        let result: NotionBlockChildren =
-            self.api_call("PATCH", &format!("/blocks/{block_id}/children"), Some(&payload))?;
+        let api_version = if children.iter().any(|child| {
+            child
+                .get("image")
+                .and_then(|image| image.get("type"))
+                .and_then(|value| value.as_str())
+                == Some("file_upload")
+        }) {
+            Self::FILE_UPLOAD_API_VERSION
+        } else {
+            &self.config.api_version
+        };
+        let result: NotionBlockChildren = self.api_call_with_version(
+            "PATCH",
+            &format!("/blocks/{block_id}/children"),
+            Some(&payload),
+            api_version,
+        )?;
         Ok(result.results)
+    }
+
+    fn upload_file(&self, filename: &str, content_type: &str, bytes: &[u8]) -> Result<String, AdapterError> {
+        let create_payload = serde_json::json!({
+            "filename": filename,
+            "content_type": content_type,
+            "content_length": bytes.len(),
+        });
+        let created: NotionFileUpload = self.api_call_with_version(
+            "POST",
+            "/file_uploads",
+            Some(&create_payload),
+            Self::FILE_UPLOAD_API_VERSION,
+        )?;
+        let upload_id = created.id;
+
+        let file_part = Part::bytes(bytes.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(content_type)
+            .map_err(|err| AdapterError::Other(format!("invalid upload mime type: {err}")))?;
+        let form = Form::new().part("file", file_part);
+        let response = self
+            .http
+            .post(format!("{}/file_uploads/{upload_id}/send", Self::BASE_URL))
+            .headers(self.auth_headers_for_version(Self::FILE_UPLOAD_API_VERSION)?)
+            .multipart(form)
+            .send()
+            .map_err(|err| AdapterError::Network {
+                message: err.to_string(),
+            })?;
+        let uploaded: NotionFileUpload = Self::decode_response(response)?;
+        if uploaded.status != "uploaded" {
+            return Err(AdapterError::Other(format!(
+                "Notion file upload {upload_id} ended with unexpected status {}",
+                uploaded.status
+            )));
+        }
+        Ok(upload_id)
+    }
+
+    fn load_blob_bytes(&self, blob_ref: &str) -> Result<Vec<u8>, AdapterError> {
+        let hash = blob_ref_sha256(blob_ref)
+            .ok_or_else(|| AdapterError::Other(format!("invalid thumbnail blob ref: {blob_ref}")))?;
+        let blob_dir = self.config.blob_dir.as_deref().ok_or_else(|| {
+            AdapterError::Other(
+                "Notion file upload requires blob_dir in configuration".to_string(),
+            )
+        })?;
+        let blob_path = blob_dir.join(hash);
+        std::fs::read(&blob_path).map_err(|err| {
+            AdapterError::Other(format!(
+                "failed to read thumbnail blob {}: {err}",
+                blob_path.display()
+            ))
+        })
+    }
+
+    fn build_thumbnail_block(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AdapterError> {
+        if let Some(blob_ref) = payload.get("thumbnail_blob_ref").and_then(|value| value.as_str()) {
+            let hash = blob_ref_sha256(blob_ref)
+                .ok_or_else(|| AdapterError::Other(format!("invalid thumbnail blob ref: {blob_ref}")))?;
+            let bytes = self.load_blob_bytes(blob_ref)?;
+            let upload_id = self.upload_file(
+                &format!("lethe-thumbnail-{}.png", &hash[..8]),
+                "image/png",
+                &bytes,
+            )?;
+            return Ok(Some(thumbnail_file_upload_block(&upload_id)));
+        }
+
+        Ok(payload
+            .get("thumbnail_url")
+            .and_then(|v| v.as_str())
+            .filter(|url| url.starts_with("http"))
+            .map(thumbnail_external_block))
     }
 
     /// Build the stacking update: replace the bot section with new content,
@@ -292,6 +416,7 @@ impl NotionClient {
         payload: &serde_json::Value,
     ) -> Result<(), AdapterError> {
         let blocks = self.get_children(page_id)?;
+        let thumbnail_block = self.build_thumbnail_block(payload)?;
 
         // Find the bot-managed section marker and collect blocks to replace.
         let mut delete_queue = Vec::new();
@@ -320,14 +445,8 @@ impl NotionClient {
         // Build new content blocks
         let mut children = Vec::new();
 
-        if let Some(slide_image_url) = payload.get("thumbnail_url").and_then(|v| v.as_str()) {
-            if slide_image_url.starts_with("http") {
-                children.push(serde_json::json!({
-                    "object": "block",
-                    "type": "image",
-                    "image": { "type": "external", "external": { "url": slide_image_url } }
-                }));
-            }
+        if let Some(thumbnail_block) = thumbnail_block {
+            children.push(thumbnail_block);
         }
 
         // Marker for the bot-managed section. Keep it non-textual so page content
@@ -591,8 +710,13 @@ impl SaaSWriteAdapter for NotionClient {
 
     fn delete_record(&self, external_id: &str) -> Result<(), AdapterError> {
         // Notion "deletes" by archiving a page
-        let payload = serde_json::json!({ "archived": true });
-        let _: serde_json::Value = self.api_call("PATCH", &format!("/pages/{external_id}"), Some(&payload))?;
+        let payload = serde_json::json!({ "in_trash": true });
+        let _: serde_json::Value = self.api_call_with_version(
+            "PATCH",
+            &format!("/pages/{external_id}"),
+            Some(&payload),
+            Self::FILE_UPLOAD_API_VERSION,
+        )?;
         Ok(())
     }
 
@@ -618,6 +742,12 @@ pub struct NotionPage {
 struct NotionQueryResult {
     #[serde(default)]
     results: Vec<NotionPage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NotionFileUpload {
+    id: String,
+    status: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -647,6 +777,15 @@ struct NotionBlockChildren {
     results: Vec<NotionBlock>,
 }
 
+fn blob_ref_sha256(blob_ref: &str) -> Option<&str> {
+    let hash = blob_ref.strip_prefix("blob:sha256:")?;
+    if hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(hash)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers: content block rendering
 // ---------------------------------------------------------------------------
@@ -673,6 +812,22 @@ fn is_bot_section_marker(block: &NotionBlock) -> bool {
 
 fn is_managed_thumbnail_block(block: &NotionBlock) -> bool {
     block.block_type == "image"
+}
+
+fn thumbnail_external_block(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "object": "block",
+        "type": "image",
+        "image": { "type": "external", "external": { "url": url } }
+    })
+}
+
+fn thumbnail_file_upload_block(file_upload_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "object": "block",
+        "type": "image",
+        "image": { "type": "file_upload", "file_upload": { "id": file_upload_id } }
+    })
 }
 
 fn sanitize_archived_block(block: &NotionBlock) -> Option<serde_json::Value> {
@@ -1052,12 +1207,11 @@ fn metadata_bool(payload: &serde_json::Value, field: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
-    fn fixture_client() -> NotionClient {
+    fn fixture_client(person_id_property_name: &str) -> NotionClient {
         let properties = [
             ("Birthplace", "rich_text"),
             ("Major_interests", "rich_text"),
             ("Hashtag", "rich_text"),
-            ("LETHE Person ID", "rich_text"),
             ("Source Slide URL", "url"),
             ("Last Synced At", "date"),
             ("Projection Version", "rich_text"),
@@ -1065,6 +1219,7 @@ mod tests {
             ("Visibility", "checkbox"),
         ]
         .into_iter()
+        .chain(std::iter::once((person_id_property_name, "rich_text")))
         .map(|(name, property_type)| {
             (
                 name.to_string(),
@@ -1084,7 +1239,6 @@ mod tests {
                     "Birthplace",
                     "Major_interests",
                     "Hashtag",
-                    "LETHE Person ID",
                     "Source Slide URL",
                     "Last Synced At",
                     "Projection Version",
@@ -1092,6 +1246,7 @@ mod tests {
                     "Visibility",
                 ]
                 .into_iter()
+                .chain(std::iter::once(person_id_property_name))
                 .map(|name| (normalize_property_name(name), name.to_string()))
                 .collect(),
                 properties,
@@ -1156,7 +1311,7 @@ mod tests {
                 "Birthplace": "Tokyo",
             }
         });
-        let props = fixture_client().build_property_updates("田中太郎", &payload);
+        let props = fixture_client("LETHE Person ID").build_property_updates("田中太郎", &payload);
         assert!(props.get("Major_interests").is_some());
         assert!(props.get("Birthplace").is_some());
         assert!(props.get("Name").is_some());
@@ -1181,7 +1336,7 @@ mod tests {
             }
         });
 
-        let props = fixture_client().build_property_updates("田中太郎", &payload);
+        let props = fixture_client("LETHE Person ID").build_property_updates("田中太郎", &payload);
 
         assert_eq!(
             props["Hashtag"]["rich_text"][0]["text"]["content"].as_str(),
@@ -1262,18 +1417,37 @@ mod tests {
 
     #[test]
     fn headers_reject_invalid_bearer_token() {
-        let mut client = fixture_client();
+        let mut client = fixture_client("LETHE Person ID");
         client.config.token = "bad\r\ntoken".into();
         assert!(matches!(
-            client.headers(),
+            client.headers_for_version(&client.config.api_version),
             Err(AdapterError::AuthFailure { .. })
         ));
     }
 
     #[test]
     fn headers_reject_invalid_api_version() {
-        let mut client = fixture_client();
+        let mut client = fixture_client("LETHE Person ID");
         client.config.api_version = "bad\r\nversion".into();
-        assert!(matches!(client.headers(), Err(AdapterError::Other(_))));
+        assert!(matches!(
+            client.headers_for_version(&client.config.api_version),
+            Err(AdapterError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn thumbnail_file_upload_block_uses_file_upload_type() {
+        let block = thumbnail_file_upload_block("upload-123");
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["image"]["type"], "file_upload");
+        assert_eq!(block["image"]["file_upload"]["id"], "upload-123");
+    }
+
+    #[test]
+    fn thumbnail_external_block_uses_external_type() {
+        let block = thumbnail_external_block("https://example.com/thumb.png");
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["image"]["type"], "external");
+        assert_eq!(block["image"]["external"]["url"], "https://example.com/thumb.png");
     }
 }

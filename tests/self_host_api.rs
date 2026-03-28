@@ -83,6 +83,7 @@ fn gslides_observation(editors: &[&str], owner: &str, title: &str, key: &str) ->
 fn test_config(db: PathBuf, blobs: PathBuf) -> SelfHostConfig {
     SelfHostConfig {
         bind_addr: "127.0.0.1:0".into(),
+        public_base_url: None,
         database_path: db,
         blob_dir: blobs,
         poll_interval: std::time::Duration::from_secs(300),
@@ -151,6 +152,45 @@ fn self_host_persons_endpoint_returns_projection_data() {
     assert_eq!(json["projection_metadata"]["projection_id"], "proj:person-page");
     assert_eq!(json["data"]["total"], 1);
     assert_eq!(json["data"]["data"][0]["display_name"], "田中太郎");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn public_blob_endpoint_serves_persisted_blob_bytes() {
+    let (root, db, blobs) = temp_paths();
+    let persistence = SqlitePersistence::open(&db, &blobs).unwrap();
+    let blob_ref = persistence.persist_blob(b"png-bytes").unwrap();
+    let blob_hash = blob_ref
+        .as_str()
+        .strip_prefix("blob:sha256:")
+        .unwrap()
+        .to_string();
+
+    let app = build_router(AppService::bootstrap(test_config(db, blobs)).unwrap());
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let response = runtime
+        .block_on(async {
+            app.oneshot(
+                Request::builder()
+                    .uri(format!("/public/blobs/{blob_hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        })
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    let body = runtime
+        .block_on(async { axum::body::to_bytes(response.into_body(), usize::MAX).await })
+        .unwrap();
+    assert_eq!(body.as_ref(), b"png-bytes");
 
     let _ = std::fs::remove_dir_all(root);
 }
