@@ -154,6 +154,29 @@ cargo run --bin lethe-selfhost
 - Slack sync は thread parent を見つけたとき `conversations.replies` も辿り、thread reply を個別 observation として取り込みます
 - 秘密鍵・アクセストークンを一度でもローカルで使った場合は、公開前に新しい値へローテーションしてください
 
+### Publication Safety Check
+
+公開前、または公開リポジトリ向けの PR を作る前に、以下を実行してください。
+
+```powershell
+./scripts/public-release-audit.ps1
+```
+
+公開切り替えの最終確認では、履歴も含めて以下を実行してください。
+
+```powershell
+./scripts/public-release-audit.ps1 -CheckHistory
+```
+
+この監査は、tracked files と git history に対して以下を検査します。
+
+- `.env` と `client_secret.json` の混入
+- `data/` 配下の runtime payload や `target/` の混入
+- 既知の token / secret pattern の混入
+- `.env.example` が placeholder のみを保持していること
+
+GitHub Actions では、履歴を除く既定の監査が自動実行されます。`-CheckHistory` は public 化の最終確認用です。
+
 ## Reading Order
 
 1. **plan.md** — まず全体像を掴む

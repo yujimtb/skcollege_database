@@ -18,3 +18,9 @@
 2. Confirm `.env` remains untracked and `.env.example` contains placeholders only.
 3. Confirm no OAuth client secret export or database snapshot is staged.
 4. Rotate any credential that was previously used in a tracked file.
+
+## Automated Audit
+
+- Run `./scripts/public-release-audit.ps1` before pushing changes to verify that newly tracked files do not contain secrets or local runtime data.
+- Run `./scripts/public-release-audit.ps1 -CheckHistory` before making the repository public. This stricter mode also fails when git history contains `.env`, `client_secret.json`, `data/` payloads, or `target/`.
+- GitHub Actions runs the default audit in `.github/workflows/public-release-guard.yml`, so new leaks are blocked on every PR and on pushes to `main`.
