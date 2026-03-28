@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -10,7 +10,7 @@ use crate::adapter::slack::client::SlackClient;
 use crate::adapter::slack::mapper::SlackAdapter;
 use crate::adapter::traits::{ObservationDraft, SourceAdapter};
 use crate::adapter::writeback::notion::client::{NotionClient, NotionConfig};
-use crate::adapter::writeback::traits::SaaSWriteAdapter;
+use crate::adapter::writeback::traits::{SaaSWriteAdapter, WriteAction, WriteRecord};
 use crate::api::envelope::{ProjectionMetadata, ResponseEnvelope};
 use crate::api::health::HealthResponse;
 use crate::api::pagination::{paginate, PaginatedResponse, PaginationParams};
@@ -30,7 +30,10 @@ use crate::identity::projector::IdentityProjector;
 use crate::identity::types::IdentityResolutionOutput;
 use crate::lake::{BlobStore, IngestRequest, IngestionGate, LakeStore};
 use crate::person_page::projector::PersonPageProjector;
-use crate::person_page::types::{PersonDetailResponse, PersonListItem, PersonPageOutput, TimelineEvent};
+use crate::person_page::types::{
+    FrontendProfile, PersonDetailResponse, PersonListItem, PersonPageOutput, PersonProfile,
+    TimelineEvent,
+};
 use crate::projection::catalog::ProjectionCatalog;
 use crate::projection::runner::Projector;
 use crate::self_host::config::SelfHostConfig;
@@ -72,6 +75,47 @@ pub struct SyncReport {
     pub duplicates: usize,
     pub last_sync_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotionReviewCandidate {
+    pub rank: usize,
+    pub person_id: String,
+    pub display_name: String,
+    pub entity_id: String,
+    pub title: String,
+    pub last_activity: Option<DateTime<Utc>>,
+    pub source_document_id: String,
+    pub source_canonical_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotionReviewWrite {
+    pub rank: usize,
+    pub entity_id: String,
+    pub title: String,
+    pub external_id: String,
+    pub url: Option<String>,
+    pub action: WriteAction,
+    pub cleaned_existing_page: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NotionReviewSyncReport {
+    pub sync_report: SyncReport,
+    pub candidates: Vec<NotionReviewCandidate>,
+    pub writes: Vec<NotionReviewWrite>,
+    pub cleaned_up: usize,
+    pub notion_synced: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RankedNotionWriteCandidate {
+    preview: NotionReviewCandidate,
+    write_record: WriteRecord,
+}
+
+const PERSON_PAGE_NOTION_PROJECTION_VERSION: &str =
+    concat!("proj:person-page@", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone)]
 pub struct ProjectionSnapshot {
@@ -189,12 +233,19 @@ impl AppCore {
         gate.ingest(request)
     }
 
-    /// Add a supplemental record using this core's lake for validation.
-    fn add_supplemental(
+    /// Upsert a supplemental record using this core's lake for validation.
+    fn upsert_supplemental(
         &mut self,
         record: crate::domain::SupplementalRecord,
-    ) -> Result<crate::domain::SupplementalId, crate::domain::DomainError> {
-        self.supplemental.upsert(record, &self.lake)
+    ) -> Result<crate::supplemental::store::UpsertRollback, crate::domain::DomainError> {
+        self.supplemental.upsert_with_rollback(record, &self.lake)
+    }
+
+    fn rollback_supplemental(
+        &mut self,
+        rollback: crate::supplemental::store::UpsertRollback,
+    ) {
+        self.supplemental.rollback_upsert(rollback);
     }
 }
 
@@ -272,6 +323,85 @@ impl AppService {
         });
     }
 
+    pub fn sync_without_notion_writeback(&self) -> Result<SyncReport, SelfHostError> {
+        let mut cloned = self.clone();
+        cloned.notion_client = None;
+        cloned.sync_all()
+    }
+
+    pub fn notion_review_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<NotionReviewCandidate>, SelfHostError> {
+        let core = self.core_lock()?;
+        Ok(ranked_notion_write_candidates_from_snapshot(&core.snapshot, limit)
+            .into_iter()
+            .map(|candidate| candidate.preview)
+            .collect())
+    }
+
+    pub fn notion_review_sync(
+        &self,
+        limit: usize,
+        refresh_data: bool,
+    ) -> Result<NotionReviewSyncReport, SelfHostError> {
+        let sync_report = if refresh_data {
+            self.sync_without_notion_writeback()?
+        } else {
+            SyncReport {
+                slack_ingested: 0,
+                google_ingested: 0,
+                slide_analyses: 0,
+                notion_synced: 0,
+                duplicates: 0,
+                last_sync_at: Utc::now(),
+            }
+        };
+        let candidates = {
+            let core = self.core_lock()?;
+            ranked_notion_write_candidates_from_snapshot(&core.snapshot, limit)
+        };
+
+        let notion = self.notion_client.as_ref().ok_or_else(|| {
+            SelfHostError::Adapter(crate::adapter::error::AdapterError::Other(
+                "notion writeback is not configured".to_string(),
+            ))
+        })?;
+
+        let mut cleaned_up = 0usize;
+        let mut writes = Vec::new();
+
+        for candidate in &candidates {
+            let existing_page = notion.find_existing(&candidate.write_record.entity_id)?;
+            let cleaned_existing_page = if let Some(existing_page) = existing_page {
+                notion.delete_record(&existing_page)?;
+                cleaned_up += 1;
+                true
+            } else {
+                false
+            };
+
+            let result = notion.write_record(&candidate.write_record)?;
+            writes.push(NotionReviewWrite {
+                rank: candidate.preview.rank,
+                entity_id: candidate.preview.entity_id.clone(),
+                title: candidate.preview.title.clone(),
+                external_id: result.external_id,
+                url: result.url,
+                action: result.action,
+                cleaned_existing_page,
+            });
+        }
+
+        Ok(NotionReviewSyncReport {
+            sync_report,
+            candidates: candidates.into_iter().map(|candidate| candidate.preview).collect(),
+            notion_synced: writes.len(),
+            writes,
+            cleaned_up,
+        })
+    }
+
     pub fn sync_all(&self) -> Result<SyncReport, SelfHostError> {
         let mut slack_ingested = 0usize;
         let mut google_ingested = 0usize;
@@ -283,13 +413,16 @@ impl AppService {
             let oldest = non_empty_state(self.persistence_lock()?.get_state(&cursor_key)?);
             let mut page_cursor: Option<String> = None;
             let mut latest_ts = oldest.clone();
+            let mut thread_roots = self.known_thread_roots(channel_id)?;
 
             loop {
                 let page = self
                     .slack_client
                     .conversations_history(channel_id, oldest.as_deref(), page_cursor.as_deref(), 200)?;
                 for message in page.messages {
-                    let thread_root = thread_root_ts(&message).map(str::to_owned);
+                    if let Some(thread_root) = thread_root_ts(&message) {
+                        thread_roots.insert(thread_root.to_string());
+                    }
                     match self.ingest_slack_message(
                         &slack_adapter,
                         &self.slack_client,
@@ -301,34 +434,19 @@ impl AppService {
                         IngestResult::Duplicate { .. } => duplicates += 1,
                         _ => {}
                     }
-
-                    if let Some(thread_ts) = thread_root {
-                        let replies = self
-                            .slack_replies_client
-                            .conversations_replies(channel_id, &thread_ts)?;
-                        for reply in replies
-                            .into_iter()
-                            .filter(|reply| reply.ts != thread_ts)
-                        {
-                            match self.ingest_slack_message(
-                                &slack_adapter,
-                                &self.slack_replies_client,
-                                channel_id,
-                                reply,
-                                &mut latest_ts,
-                            )? {
-                                IngestResult::Ingested { .. } => slack_ingested += 1,
-                                IngestResult::Duplicate { .. } => duplicates += 1,
-                                _ => {}
-                            }
-                        }
-                    }
                 }
                 if page.has_more {
                     page_cursor = page.next_cursor;
                 } else {
                     break;
                 }
+            }
+
+            for thread_ts in thread_roots {
+                let (ingested, dupes) =
+                    self.sync_thread_replies(&slack_adapter, channel_id, &thread_ts)?;
+                slack_ingested += ingested;
+                duplicates += dupes;
             }
 
             let channel_snapshot = self.slack_client.conversations_info(channel_id)?;
@@ -497,19 +615,18 @@ impl AppService {
                     .unwrap_or_default()
                     .to_string();
 
-                let slides: Vec<_> = presentation
-                    .slides
-                    .iter()
-                    .take(self.config.slide_analysis_limit)
-                    .cloned()
-                    .collect();
-                let mut slide_index = 0usize;
+                let candidate_slide_indices =
+                    ranked_self_intro_slide_indices(&presentation, self.config.slide_analysis_limit);
+                let mut consumed_slide_indices = HashSet::new();
 
-                while slide_index < slides.len() {
-                    let slide = &slides[slide_index];
+                for slide_index in candidate_slide_indices {
+                    if !consumed_slide_indices.insert(slide_index) {
+                        continue;
+                    }
+
+                    let slide = &presentation.slides[slide_index];
                     if let Some(existing) = find_slide_analysis_record(&slide_analysis_records, presentation_id, &slide.object_id) {
                         if !self.slide_analyzer.is_some() || !analysis_record_needs_refresh(existing, &analysis_model) {
-                            slide_index += 1;
                             continue;
                         }
                     }
@@ -523,10 +640,10 @@ impl AppService {
                             observation,
                             &canonical_uri,
                         )
-                        .or_else(|| heuristic_profile(observation)) else {
-                        slide_index += 1;
+                        .or_else(|| heuristic_profile_for_slide(observation, slide)) else {
                         continue;
                     };
+                    profile.normalize_in_place();
 
                     profile.source_slide_object_id = Some(slide.object_id.clone());
                     profile.source_document_id = Some(format!(
@@ -541,7 +658,7 @@ impl AppService {
                     let mut consumed_companion = false;
                     let mut companion_result = None;
 
-                    if let Some(next_slide) = slides.get(slide_index + 1) {
+                    if let Some(next_slide) = presentation.slides.get(slide_index + 1) {
                         let companion_rendered = self.google_client.render_slide(presentation_id, &next_slide.object_id, "png")?;
                         let Some(mut companion_profile) = self
                             .extract_student_profile_from_png(
@@ -549,10 +666,10 @@ impl AppService {
                                 observation,
                                 &canonical_uri,
                             )
-                            .or_else(|| heuristic_profile(observation)) else {
-                                slide_index += 1;
+                            .or_else(|| heuristic_profile_for_slide(observation, next_slide)) else {
                                 continue;
                             };
+                        companion_profile.normalize_in_place();
 
                         companion_profile.source_slide_object_id = Some(next_slide.object_id.clone());
                         companion_profile.source_document_id = Some(format!(
@@ -569,10 +686,12 @@ impl AppService {
                             companion_profile.thumbnail_blob_ref = Some(companion_blob_ref.as_str().to_string());
                             merge_companion_profile(&mut profile, &companion_profile);
                             consumed_companion = true;
+                            consumed_slide_indices.insert(slide_index + 1);
                         }
                     }
 
                     ensure_profile_identifier(&mut profile, &slide.object_id);
+                    profile.normalize_in_place();
 
                     let email = profile
                         .email
@@ -598,7 +717,7 @@ impl AppService {
                     });
 
                     if consumed_companion {
-                        if let Some(next_slide) = slides.get(slide_index + 1) {
+                        if let Some(next_slide) = presentation.slides.get(slide_index + 1) {
                             let mut companion_profile = profile.clone();
                             companion_profile.source_slide_object_id = Some(next_slide.object_id.clone());
                             companion_profile.source_document_id = Some(format!(
@@ -628,8 +747,6 @@ impl AppService {
                     if let Some(companion_result) = companion_result {
                         analysis_results.push(companion_result);
                     }
-
-                    slide_index += if consumed_companion { 2 } else { 1 };
                 }
             }
 
@@ -637,9 +754,23 @@ impl AppService {
 
             for result in &analysis_results {
                 let record = crate::slide_analysis::SlideAnalysisProjector::build_supplemental(result);
-                core.add_supplemental(record.clone())
+                let rollback = core
+                    .upsert_supplemental(record)
                     .map_err(|err| SelfHostError::Ingestion(err.to_string()))?;
-                self.persistence_lock()?.persist_supplemental(&record)?;
+                let persisted_record = core
+                    .supplemental
+                    .get(&rollback.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        SelfHostError::Ingestion(format!(
+                            "supplemental {} missing after upsert",
+                            rollback.id
+                        ))
+                    })?;
+                if let Err(err) = self.persistence_lock()?.persist_supplemental(&persisted_record) {
+                    core.rollback_supplemental(rollback);
+                    return Err(SelfHostError::Persistence(err));
+                }
             }
 
             for result in &analysis_results {
@@ -673,33 +804,11 @@ impl AppService {
             .person_page
             .profiles
             .iter()
-            .into_iter()
             .filter_map(|person| {
-                let frontend = person.frontend_profile.clone()?;
-                let profile = frontend.profile;
-                let entity_id = profile
-                    .email
-                    .as_deref()
-                    .or(profile.generated_email.as_deref())
-                    .or(profile.source_document_id.as_deref())?
-                    .to_string();
-                Some((
-                    entity_id.clone(),
-                    crate::adapter::writeback::traits::WriteRecord {
-                        entity_id,
-                        title: if profile.name.trim().is_empty() {
-                            frontend
-                                .source_document_id
-                                .rsplit_once("#slide:")
-                                .map(|(_, slide_id)| slide_id.to_string())
-                                .unwrap_or_else(|| "Untitled Slide".to_string())
-                        } else {
-                            profile.name.clone()
-                        },
-                        payload: serde_json::to_value(profile).ok()?,
-                        external_id: None,
-                    },
-                ))
+                let frontend = person.frontend_profile.as_ref()?;
+                let write_record =
+                    notion_write_record_for_person(person, frontend, core.snapshot.built_at)?;
+                Some((write_record.entity_id.clone(), write_record))
             })
             .collect::<HashMap<_, _>>()
             .into_values()
@@ -1030,23 +1139,52 @@ impl AppService {
         self.ingest_draft(slack_adapter.map_message(&message))
     }
 
-    fn extract_student_profile(
+    fn sync_thread_replies(
         &self,
-        observation: &Observation,
-        blobs: &BlobStore,
-    ) -> Option<crate::slide_analysis::types::StudentProfile> {
-        if let Some(analyzer) = &self.slide_analyzer {
-            match analyzer.extract_profile(observation, blobs) {
-                Ok(Some(profile)) => return Some(profile),
-                Ok(None) => {}
-                Err(err) => eprintln!(
-                    "slide ai analysis failed for {}: {err}; falling back to heuristic profile",
-                    observation.id
-                ),
+        slack_adapter: &SlackAdapter<HttpSlackClient>,
+        channel_id: &str,
+        thread_ts: &str,
+    ) -> Result<(usize, usize), SelfHostError> {
+        let cursor_key = thread_cursor_key(channel_id, thread_ts);
+        let reply_oldest = non_empty_state(self.persistence_lock()?.get_state(&cursor_key)?)
+            .unwrap_or_else(|| thread_ts.to_string());
+        let replies = self
+            .slack_replies_client
+            .conversations_replies(channel_id, thread_ts, Some(reply_oldest.as_str()))?;
+        let mut latest_reply_ts = Some(reply_oldest);
+        let mut ingested = 0usize;
+        let mut duplicates = 0usize;
+
+        for reply in replies.into_iter().filter(|reply| reply.ts != thread_ts) {
+            match self.ingest_slack_message(
+                slack_adapter,
+                &self.slack_replies_client,
+                channel_id,
+                reply,
+                &mut latest_reply_ts,
+            )? {
+                IngestResult::Ingested { .. } => ingested += 1,
+                IngestResult::Duplicate { .. } => duplicates += 1,
+                _ => {}
             }
         }
 
-        heuristic_profile(observation)
+        if let Some(latest_reply_ts) = latest_reply_ts.as_deref() {
+            self.persistence_lock()?.set_state(&cursor_key, latest_reply_ts)?;
+        }
+
+        Ok((ingested, duplicates))
+    }
+
+    fn known_thread_roots(&self, channel_id: &str) -> Result<BTreeSet<String>, SelfHostError> {
+        let core = self.core_lock()?;
+        let observations: Vec<Observation> = core
+            .lake
+            .by_schema(&SchemaRef::new("schema:slack-message"))
+            .into_iter()
+            .cloned()
+            .collect();
+        Ok(known_thread_roots_from_observations(&observations, channel_id))
     }
 
     fn extract_student_profile_from_png(
@@ -1190,6 +1328,53 @@ fn thread_root_ts(
     Some(message.thread_ts.as_deref().unwrap_or(message.ts.as_str()))
 }
 
+fn thread_cursor_key(channel_id: &str, thread_ts: &str) -> String {
+    format!("slack:{channel_id}:thread:{thread_ts}:oldest_ts")
+}
+
+fn known_thread_roots_from_observations(
+    observations: &[Observation],
+    channel_id: &str,
+) -> BTreeSet<String> {
+    observations
+        .iter()
+        .filter_map(|observation| {
+            if observation.schema.as_str() != "schema:slack-message" {
+                return None;
+            }
+
+            if observation
+                .payload
+                .get("channel_id")
+                .and_then(|value| value.as_str())
+                != Some(channel_id)
+            {
+                return None;
+            }
+
+            let ts = observation
+                .payload
+                .get("ts")
+                .and_then(|value| value.as_str())?;
+            let thread_ts = observation
+                .payload
+                .get("thread_ts")
+                .and_then(|value| value.as_str());
+            let reply_count = observation
+                .payload
+                .get("reply_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+
+            if thread_ts == Some(ts) || (thread_ts.is_none() && reply_count > 0) {
+                return Some(ts.to_string());
+            }
+
+            None
+        })
+        .collect()
+}
+
 fn non_empty_state(value: Option<String>) -> Option<String> {
     value.filter(|raw| !raw.trim().is_empty())
 }
@@ -1206,17 +1391,34 @@ fn slack_ts_value(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(0.0)
 }
 
-fn heuristic_profile(observation: &Observation) -> Option<crate::slide_analysis::types::StudentProfile> {
-    let title = observation
-        .payload
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Unknown");
-    Some(crate::slide_analysis::types::StudentProfile {
-        email: None,
+fn heuristic_profile_for_slide(
+    observation: &Observation,
+    slide: &crate::adapter::gslides::client::SlideNative,
+) -> Option<crate::slide_analysis::types::StudentProfile> {
+    let fragments = extract_slide_text_fragments(slide);
+    let email = find_first_email(&fragments);
+    let name = infer_profile_name_from_fragments(&fragments).unwrap_or_else(|| {
+        observation
+            .payload
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    });
+    let bio_lines = fragments
+        .into_iter()
+        .filter(|fragment| {
+            let trimmed = fragment.trim();
+            !trimmed.is_empty() && Some(trimmed) != email.as_deref() && trimmed != name
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+
+    let mut profile = crate::slide_analysis::types::StudentProfile {
+        email,
         generated_email: None,
-        name: title.to_string(),
-        bio_text: None,
+        name,
+        bio_text: (!bio_lines.is_empty()).then(|| bio_lines.join("\n")),
         profile_pic: None,
         gallery_images: vec![],
         properties: Default::default(),
@@ -1227,7 +1429,9 @@ fn heuristic_profile(observation: &Observation) -> Option<crate::slide_analysis:
         thumbnail_blob_ref: None,
         thumbnail_url: None,
         companion_to_slide_object_id: None,
-    })
+    };
+    profile.normalize_in_place();
+    Some(profile)
 }
 
 fn analysis_record_needs_refresh(
@@ -1268,28 +1472,7 @@ fn should_merge_companion_slide(
 }
 
 fn profile_has_content(profile: &crate::slide_analysis::types::StudentProfile) -> bool {
-    profile.bio_text.as_ref().is_some_and(|text| !text.trim().is_empty())
-        || profile.profile_pic.is_some()
-        || !profile.gallery_images.is_empty()
-        || !profile.attributes.is_empty()
-        || profile.properties.nickname.is_some()
-        || profile.properties.birthplace.is_some()
-        || profile.properties.dob.is_some()
-        || profile.properties.major.is_some()
-        || profile.properties.affiliation.is_some()
-        || profile.properties.mbti.is_some()
-        || profile.properties.sns.is_some()
-        || !profile.properties.hobbies.is_empty()
-        || !profile.properties.interests.is_empty()
-        || !profile.properties.likes.is_empty()
-        || profile.properties.dislikes.is_some()
-        || !profile.properties.hashtags.is_empty()
-        || profile.properties.new_challenges.is_some()
-        || profile.properties.ask_me_about.is_some()
-        || profile.properties.turning_point.is_some()
-        || profile.properties.btw.is_some()
-        || profile.properties.message.is_some()
-        || profile.thumbnail_url.is_some()
+    profile.has_meaningful_content() || profile.thumbnail_url.is_some()
 }
 
 fn normalize_profile_name(value: &str) -> String {
@@ -1417,31 +1600,348 @@ fn find_slide_analysis_record<'a>(
 }
 
 fn analysis_record_is_rich(record: &crate::domain::SupplementalRecord) -> bool {
-    let Ok(profile) = serde_json::from_value::<crate::slide_analysis::types::StudentProfile>(record.payload.clone()) else {
+    let Ok(mut profile) = serde_json::from_value::<crate::slide_analysis::types::StudentProfile>(record.payload.clone()) else {
         return false;
     };
+    profile.normalize_in_place();
+    profile.has_meaningful_content()
+}
 
-    profile.bio_text.as_ref().is_some_and(|text| !text.trim().is_empty())
-        || profile.profile_pic.is_some()
-        || !profile.gallery_images.is_empty()
-        || !profile.attributes.is_empty()
-        || profile.properties.nickname.is_some()
-        || profile.properties.birthplace.is_some()
-        || profile.properties.dob.is_some()
-        || profile.properties.major.is_some()
-        || profile.properties.affiliation.is_some()
-        || profile.properties.mbti.is_some()
-        || profile.properties.sns.is_some()
-        || !profile.properties.hobbies.is_empty()
-        || !profile.properties.interests.is_empty()
-        || !profile.properties.likes.is_empty()
-        || profile.properties.dislikes.is_some()
-        || !profile.properties.hashtags.is_empty()
-        || profile.properties.new_challenges.is_some()
-        || profile.properties.ask_me_about.is_some()
-        || profile.properties.turning_point.is_some()
-        || profile.properties.btw.is_some()
-        || profile.properties.message.is_some()
+fn ranked_notion_write_candidates_from_snapshot(
+    snapshot: &ProjectionSnapshot,
+    limit: usize,
+) -> Vec<RankedNotionWriteCandidate> {
+    let mut ranked = snapshot
+        .person_page
+        .profiles
+        .iter()
+        .filter_map(|person| {
+            snapshot
+                .person_page
+                .activities
+                .iter()
+                .find(|activity| activity.person_id == person.person_id)?;
+            let frontend = person.frontend_profile.as_ref()?;
+            let write_record =
+                notion_write_record_for_person(person, frontend, snapshot.built_at)?;
+
+            Some(RankedNotionWriteCandidate {
+                preview: NotionReviewCandidate {
+                    rank: 0,
+                    person_id: person.person_id.as_str().to_string(),
+                    display_name: person.display_name.clone(),
+                    entity_id: write_record.entity_id.clone(),
+                    title: write_record.title.clone(),
+                    last_activity: person.last_activity,
+                    source_document_id: frontend.source_document_id.clone(),
+                    source_canonical_uri: frontend.source_canonical_uri.clone(),
+                },
+                write_record,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .preview
+            .last_activity
+            .cmp(&left.preview.last_activity)
+            .then(left.preview.display_name.cmp(&right.preview.display_name))
+            .then(left.preview.entity_id.cmp(&right.preview.entity_id))
+    });
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for mut candidate in ranked {
+        if !seen.insert(candidate.preview.entity_id.clone()) {
+            continue;
+        }
+        if deduped.len() >= limit {
+            break;
+        }
+        candidate.preview.rank = deduped.len() + 1;
+        deduped.push(candidate);
+    }
+
+    deduped
+}
+
+fn notion_write_record_for_person(
+    person: &PersonProfile,
+    frontend: &FrontendProfile,
+    synced_at: DateTime<Utc>,
+) -> Option<WriteRecord> {
+    let profile = frontend.profile.clone();
+    let entity_id = profile
+        .email
+        .as_deref()
+        .or(profile.generated_email.as_deref())
+        .or(profile.source_document_id.as_deref())?
+        .to_string();
+    let title = notion_title_for_profile(&profile, frontend);
+    let mut payload = serde_json::to_value(profile).ok()?;
+    let payload_object = payload.as_object_mut()?;
+    payload_object.insert(
+        "_dokp".to_string(),
+        serde_json::json!({
+            "person_id": person.person_id.as_str(),
+            "projection_version": PERSON_PAGE_NOTION_PROJECTION_VERSION,
+            "last_synced_at": synced_at.to_rfc3339(),
+            "source_slide_url": frontend.source_canonical_uri,
+            "status": "Done",
+            "visibility": true,
+        }),
+    );
+    Some(WriteRecord {
+        entity_id,
+        title,
+        payload,
+        external_id: None,
+    })
+}
+
+fn notion_title_for_profile(
+    profile: &crate::slide_analysis::types::StudentProfile,
+    frontend: &FrontendProfile,
+) -> String {
+    if profile.name.trim().is_empty() {
+        frontend
+            .source_document_id
+            .rsplit_once("#slide:")
+            .map(|(_, slide_id)| slide_id.to_string())
+            .unwrap_or_else(|| "Untitled Slide".to_string())
+    } else {
+        profile.name.clone()
+    }
+}
+
+fn ranked_self_intro_slide_indices(
+    presentation: &crate::adapter::gslides::client::PresentationNative,
+    limit: usize,
+) -> Vec<usize> {
+    let mut ranked = presentation
+        .slides
+        .iter()
+        .enumerate()
+        .map(|(index, slide)| {
+            (
+                index,
+                score_self_intro_slide(slide, index, presentation.slides.len()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then(left.0.cmp(&right.0))
+    });
+
+    let positive = ranked.iter().filter(|(_, score)| *score > 0).count();
+    ranked
+        .into_iter()
+        .take(if positive == 0 {
+            limit.min(presentation.slides.len())
+        } else {
+            limit.min(positive)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn score_self_intro_slide(
+    slide: &crate::adapter::gslides::client::SlideNative,
+    index: usize,
+    total_slides: usize,
+) -> i32 {
+    let fragments = extract_slide_text_fragments(slide);
+    if fragments.is_empty() {
+        return 0;
+    }
+
+    let text = fragments.join("\n").to_lowercase();
+    let mut score = 0i32;
+
+    if find_first_email(&fragments).is_some() {
+        score += 8;
+    }
+
+    score += keyword_score(
+        &text,
+        &[
+            "自己紹介",
+            "self intro",
+            "self-introduction",
+            "about me",
+            "profile",
+            "プロフィール",
+            "my name",
+            "名前",
+        ],
+        6,
+    );
+    score += keyword_score(
+        &text,
+        &[
+            "nickname",
+            "ニックネーム",
+            "mbti",
+            "birthplace",
+            "出身",
+            "hobby",
+            "hobbies",
+            "趣味",
+            "interest",
+            "interests",
+            "好き",
+            "likes",
+            "dislikes",
+            "所属",
+            "affiliation",
+            "major",
+            "学部",
+            "学科",
+            "message",
+            "challenge",
+            "turning point",
+            "ask me",
+        ],
+        2,
+    );
+    score += keyword_score(&text, &["私", "ぼく", "僕", "俺", "i am", "i'm"], 1);
+    score -= keyword_score(
+        &text,
+        &[
+            "agenda",
+            "project",
+            "summary",
+            "overview",
+            "roadmap",
+            "schedule",
+            "目次",
+            "進捗",
+            "研究計画",
+            "team",
+        ],
+        2,
+    );
+
+    if fragments.len() >= 3 {
+        score += 2;
+    }
+    if slide_has_image_elements(slide) {
+        score += 2;
+    }
+
+    let early_bonus = (total_slides.saturating_sub(index)).min(3) as i32;
+    score + early_bonus
+}
+
+fn keyword_score(text: &str, keywords: &[&str], weight: i32) -> i32 {
+    keywords
+        .iter()
+        .filter(|keyword| text.contains(**keyword))
+        .count() as i32
+        * weight
+}
+
+fn extract_slide_text_fragments(
+    slide: &crate::adapter::gslides::client::SlideNative,
+) -> Vec<String> {
+    let mut fragments = Vec::new();
+    for element in &slide.page_elements {
+        collect_slide_text_values(element, None, &mut fragments);
+    }
+
+    let mut deduped = Vec::new();
+    for fragment in fragments {
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !deduped.iter().any(|existing: &String| existing == trimmed) {
+            deduped.push(trimmed.to_string());
+        }
+    }
+    deduped
+}
+
+fn collect_slide_text_values(
+    value: &serde_json::Value,
+    key: Option<&str>,
+    fragments: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (child_key, child_value) in map {
+                collect_slide_text_values(child_value, Some(child_key.as_str()), fragments);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_slide_text_values(child, key, fragments);
+            }
+        }
+        serde_json::Value::String(text)
+            if matches!(key, Some("content") | Some("description") | Some("title")) =>
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                fragments.push(trimmed.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn slide_has_image_elements(slide: &crate::adapter::gslides::client::SlideNative) -> bool {
+    slide.page_elements.iter().any(|element| {
+        element
+            .get("image")
+            .is_some()
+            || element
+                .get("shape")
+                .and_then(|shape| shape.get("shapeType"))
+                .and_then(|value| value.as_str())
+                == Some("RECTANGLE")
+    })
+}
+
+fn find_first_email(fragments: &[String]) -> Option<String> {
+    fragments.iter().find_map(|fragment| {
+        fragment
+            .split_whitespace()
+            .map(|token| token.trim_matches(|ch: char| {
+                matches!(ch, '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';')
+            }))
+            .find(|token| token.contains('@') && token.contains('.'))
+            .map(|token| token.to_lowercase())
+    })
+}
+
+fn infer_profile_name_from_fragments(fragments: &[String]) -> Option<String> {
+    fragments.iter().find_map(|fragment| {
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() || trimmed.contains('@') || trimmed.len() > 40 {
+            return None;
+        }
+        let lowered = trimmed.to_lowercase();
+        if [
+            "自己紹介",
+            "self intro",
+            "profile",
+            "about me",
+            "nickname",
+            "mbti",
+        ]
+        .iter()
+        .any(|keyword| lowered.contains(keyword))
+        {
+            return None;
+        }
+        Some(trimmed.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -1455,7 +1955,13 @@ mod tests {
     use crate::adapter::gslides::client::SlideRevision;
     use chrono::Utc;
 
-    use super::{AppCore, AppService, SelfHostError, latest_revision_to_capture, non_empty_state, thread_root_ts};
+    use super::{
+        AppCore, AppService, PERSON_PAGE_NOTION_PROJECTION_VERSION, ProjectionSnapshot,
+        SelfHostError, extract_slide_text_fragments, infer_profile_name_from_fragments,
+        known_thread_roots_from_observations, latest_revision_to_capture, non_empty_state,
+        ranked_notion_write_candidates_from_snapshot, ranked_self_intro_slide_indices,
+        thread_cursor_key, thread_root_ts,
+    };
     use crate::domain::{
         ActorRef, AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Mutability,
         Observation, ObserverRef, SchemaRef, SemVer, SupplementalId, SupplementalRecord,
@@ -1581,6 +2087,283 @@ mod tests {
         };
 
         assert_eq!(thread_root_ts(&message), Some("1234567890.123456"));
+    }
+
+    #[test]
+    fn thread_cursor_key_is_stable() {
+        assert_eq!(
+            thread_cursor_key("C01ABC", "1234567890.123456"),
+            "slack:C01ABC:thread:1234567890.123456:oldest_ts"
+        );
+    }
+
+    #[test]
+    fn known_thread_roots_from_observations_finds_thread_parents() {
+        fn slack_observation(
+            channel_id: &str,
+            ts: &str,
+            thread_ts: Option<&str>,
+            reply_count: Option<u64>,
+        ) -> Observation {
+            let mut payload = serde_json::json!({
+                "channel_id": channel_id,
+                "ts": ts,
+                "text": "hello",
+            });
+            if let Some(thread_ts) = thread_ts {
+                payload["thread_ts"] = serde_json::json!(thread_ts);
+            }
+            if let Some(reply_count) = reply_count {
+                payload["reply_count"] = serde_json::json!(reply_count);
+            }
+
+            Observation {
+                id: Observation::new_id(),
+                schema: SchemaRef::new("schema:slack-message"),
+                schema_version: SemVer::new("1.0.0"),
+                observer: ObserverRef::new("obs:slack-crawler"),
+                source_system: Some(crate::domain::SourceSystemRef::new("sys:slack")),
+                actor: None,
+                authority_model: AuthorityModel::LakeAuthoritative,
+                capture_model: CaptureModel::Event,
+                subject: EntityRef::new(format!("message:slack:{channel_id}:{ts}")),
+                target: None,
+                payload,
+                attachments: vec![],
+                published: Utc::now(),
+                recorded_at: Utc::now(),
+                consent: None,
+                idempotency_key: Some(IdempotencyKey::new(format!(
+                    "slack:{channel_id}:{ts}"
+                ))),
+                meta: serde_json::json!({}),
+            }
+        }
+
+        let roots = known_thread_roots_from_observations(
+            &[
+                slack_observation("C01ABC", "100.000001", None, Some(2)),
+                slack_observation("C01ABC", "101.000001", Some("100.000001"), None),
+                slack_observation("C02XYZ", "200.000001", None, Some(3)),
+                slack_observation("C01ABC", "102.000001", None, Some(0)),
+            ],
+            "C01ABC",
+        );
+
+        assert_eq!(
+            roots,
+            std::collections::BTreeSet::from(["100.000001".to_string()])
+        );
+    }
+
+    #[test]
+    fn ranked_self_intro_slide_indices_prioritize_profile_like_slides() {
+        let presentation = crate::adapter::gslides::client::PresentationNative {
+            presentation_id: "deck-1".into(),
+            title: "2026 Slides".into(),
+            locale: None,
+            slides: vec![
+                crate::adapter::gslides::client::SlideNative {
+                    object_id: "agenda".into(),
+                    page_elements: vec![serde_json::json!({
+                        "shape": {
+                            "text": {
+                                "textElements": [{ "textRun": { "content": "Agenda\n" } }]
+                            }
+                        }
+                    })],
+                },
+                crate::adapter::gslides::client::SlideNative {
+                    object_id: "profile".into(),
+                    page_elements: vec![
+                        serde_json::json!({
+                            "shape": {
+                                "text": {
+                                    "textElements": [
+                                        { "textRun": { "content": "自己紹介\n" } },
+                                        { "textRun": { "content": "田中太郎\n" } },
+                                        { "textRun": { "content": "tanaka@example.jp\n" } },
+                                        { "textRun": { "content": "趣味: 写真\n" } }
+                                    ]
+                                }
+                            }
+                        }),
+                        serde_json::json!({ "image": { "contentUrl": "https://example.com/pic.png" } }),
+                    ],
+                },
+            ],
+            page_size: None,
+        };
+
+        let ranked = ranked_self_intro_slide_indices(&presentation, 2);
+        assert_eq!(ranked[0], 1);
+    }
+
+    #[test]
+    fn extract_slide_text_fragments_and_name_inference_use_text_runs() {
+        let slide = crate::adapter::gslides::client::SlideNative {
+            object_id: "profile".into(),
+            page_elements: vec![serde_json::json!({
+                "shape": {
+                    "text": {
+                        "textElements": [
+                            { "textRun": { "content": "田中太郎\n" } },
+                            { "textRun": { "content": "自己紹介\n" } }
+                        ]
+                    }
+                }
+            })],
+        };
+
+        let fragments = extract_slide_text_fragments(&slide);
+        assert!(fragments.iter().any(|fragment| fragment == "田中太郎"));
+        assert_eq!(
+            infer_profile_name_from_fragments(&fragments).as_deref(),
+            Some("田中太郎")
+        );
+    }
+
+    #[test]
+    fn ranked_notion_write_candidates_follow_last_activity_order() {
+        let rich_profile = crate::person_page::types::PersonProfile {
+            person_id: EntityRef::new("person:a"),
+            display_name: "A Person".into(),
+            self_intro_text: Some("A intro".into()),
+            self_intro_slide_id: Some("document:gslides:a#slide:1".into()),
+            self_intro_thumbnail: None,
+            identities: vec![],
+            source_count: 1,
+            last_activity: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-03-28T10:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+            ),
+            profile_updated_at: Utc::now(),
+            frontend_profile: Some(crate::person_page::types::FrontendProfile {
+                source_document_id: "document:gslides:a#slide:1".into(),
+                source_canonical_uri: Some("https://example.com/a".into()),
+                thumbnail_ref: None,
+                thumbnail_url: None,
+                profile: crate::slide_analysis::types::StudentProfile {
+                    email: Some("a@example.com".into()),
+                    generated_email: None,
+                    name: "A Person".into(),
+                    bio_text: Some("bio".into()),
+                    profile_pic: None,
+                    gallery_images: vec![],
+                    properties: Default::default(),
+                    attributes: vec![],
+                    source_slide_object_id: Some("1".into()),
+                    source_document_id: Some("document:gslides:a#slide:1".into()),
+                    source_canonical_uri: Some("https://example.com/a".into()),
+                    thumbnail_blob_ref: None,
+                    thumbnail_url: None,
+                    companion_to_slide_object_id: None,
+                },
+            }),
+        };
+        let older_profile = crate::person_page::types::PersonProfile {
+            person_id: EntityRef::new("person:b"),
+            display_name: "B Person".into(),
+            self_intro_text: Some("B intro".into()),
+            self_intro_slide_id: Some("document:gslides:b#slide:1".into()),
+            self_intro_thumbnail: None,
+            identities: vec![],
+            source_count: 1,
+            last_activity: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-03-27T10:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+            ),
+            profile_updated_at: Utc::now(),
+            frontend_profile: Some(crate::person_page::types::FrontendProfile {
+                source_document_id: "document:gslides:b#slide:1".into(),
+                source_canonical_uri: Some("https://example.com/b".into()),
+                thumbnail_ref: None,
+                thumbnail_url: None,
+                profile: crate::slide_analysis::types::StudentProfile {
+                    email: Some("b@example.com".into()),
+                    generated_email: None,
+                    name: "B Person".into(),
+                    bio_text: Some("bio".into()),
+                    profile_pic: None,
+                    gallery_images: vec![],
+                    properties: Default::default(),
+                    attributes: vec![],
+                    source_slide_object_id: Some("1".into()),
+                    source_document_id: Some("document:gslides:b#slide:1".into()),
+                    source_canonical_uri: Some("https://example.com/b".into()),
+                    thumbnail_blob_ref: None,
+                    thumbnail_url: None,
+                    companion_to_slide_object_id: None,
+                },
+            }),
+        };
+
+        let snapshot = ProjectionSnapshot {
+            identity: Default::default(),
+            person_page: crate::person_page::types::PersonPageOutput {
+                profiles: vec![older_profile, rich_profile],
+                slides: vec![],
+                messages: vec![],
+                activities: vec![
+                    crate::person_page::types::PersonActivity {
+                        person_id: EntityRef::new("person:a"),
+                        total_slides_related: 1,
+                        total_messages: 0,
+                        first_activity: None,
+                        last_activity: Some(
+                            chrono::DateTime::parse_from_rfc3339("2026-03-28T10:00:00Z")
+                                .unwrap()
+                                .to_utc(),
+                        ),
+                        active_channels: vec![],
+                    },
+                    crate::person_page::types::PersonActivity {
+                        person_id: EntityRef::new("person:b"),
+                        total_slides_related: 1,
+                        total_messages: 0,
+                        first_activity: None,
+                        last_activity: Some(
+                            chrono::DateTime::parse_from_rfc3339("2026-03-27T10:00:00Z")
+                                .unwrap()
+                                .to_utc(),
+                        ),
+                        active_channels: vec![],
+                    },
+                ],
+            },
+            built_at: Utc::now(),
+        };
+
+        let ranked = ranked_notion_write_candidates_from_snapshot(&snapshot, 2);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].preview.entity_id, "a@example.com");
+        assert_eq!(ranked[1].preview.entity_id, "b@example.com");
+        assert_eq!(
+            ranked[0]
+                .write_record
+                .payload
+                .pointer("/_dokp/person_id")
+                .and_then(|value| value.as_str()),
+            Some("person:a")
+        );
+        assert_eq!(
+            ranked[0]
+                .write_record
+                .payload
+                .pointer("/_dokp/projection_version")
+                .and_then(|value| value.as_str()),
+            Some(PERSON_PAGE_NOTION_PROJECTION_VERSION)
+        );
+        assert_eq!(
+            ranked[0]
+                .write_record
+                .payload
+                .pointer("/_dokp/status")
+                .and_then(|value| value.as_str()),
+            Some("Done")
+        );
     }
 
     #[test]

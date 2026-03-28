@@ -36,35 +36,50 @@ impl HttpGoogleSlidesClient {
     }
 
     fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, AdapterError> {
-        let response = self
-            .http
-            .get(url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.bearer_token()?))
-            .send()
-            .map_err(|err| AdapterError::Network {
+        let mut token = self.bearer_token()?;
+
+        for attempt in 0..2 {
+            let response = self
+                .http
+                .get(url)
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .send()
+                .map_err(|err| AdapterError::Network {
+                    message: err.to_string(),
+                })?;
+
+            let status = response.status();
+
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                if attempt == 0 {
+                    if let Some(refreshed) = self.auth.refresh_access_token(&self.http)? {
+                        token = refreshed;
+                        continue;
+                    }
+                }
+
+                return Err(AdapterError::AuthFailure {
+                    message: "google oauth token rejected".to_string(),
+                });
+            }
+
+            let body = response.text().map_err(|err| AdapterError::Network {
                 message: err.to_string(),
             })?;
 
-        let status = response.status();
+            if !status.is_success() {
+                return Err(AdapterError::MalformedResponse {
+                    message: format!("google api {url} returned {status}: {body}"),
+                });
+            }
 
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(AdapterError::AuthFailure {
-                message: "google oauth token rejected".to_string(),
+            return serde_json::from_str::<T>(&body).map_err(|err| AdapterError::MalformedResponse {
+                message: format!("google api {url} decode error: {err}; body: {body}"),
             });
         }
 
-        let body = response.text().map_err(|err| AdapterError::Network {
-            message: err.to_string(),
-        })?;
-
-        if !status.is_success() {
-            return Err(AdapterError::MalformedResponse {
-                message: format!("google api {url} returned {status}: {body}"),
-            });
-        }
-
-        serde_json::from_str::<T>(&body).map_err(|err| AdapterError::MalformedResponse {
-            message: format!("google api {url} decode error: {err}; body: {body}"),
+        Err(AdapterError::AuthFailure {
+            message: "google oauth token rejected".to_string(),
         })
     }
 }
@@ -235,10 +250,6 @@ impl GoogleTokenSource {
     }
 
     fn access_token(&self, http: &Client) -> Result<String, AdapterError> {
-        if let Some(token) = self.config.access_token.clone() {
-            return Ok(token);
-        }
-
         if let Some(cached) = self
             .cached
             .lock()
@@ -249,6 +260,37 @@ impl GoogleTokenSource {
                 return Ok(cached.access_token);
             }
         }
+
+        if let Some(token) = self.config.access_token.clone() {
+            return Ok(token);
+        }
+
+        self.exchange_refresh_token(http)
+    }
+
+    fn refresh_access_token(&self, http: &Client) -> Result<Option<String>, AdapterError> {
+        if !self.can_refresh() {
+            return Ok(None);
+        }
+
+        self.clear_cached_token();
+        self.exchange_refresh_token(http).map(Some)
+    }
+
+    fn can_refresh(&self) -> bool {
+        self.config.client_id.is_some()
+            && self.config.client_secret.is_some()
+            && self.config.refresh_token.is_some()
+    }
+
+    fn clear_cached_token(&self) {
+        *self
+            .cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn exchange_refresh_token(&self, http: &Client) -> Result<String, AdapterError> {
 
         let client_id = self.config.client_id.clone().ok_or_else(|| AdapterError::AuthFailure {
             message: "missing DOKP_GOOGLE_CLIENT_ID".to_string(),

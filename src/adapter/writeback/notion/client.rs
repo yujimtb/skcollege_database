@@ -55,7 +55,24 @@ pub struct NotionClient {
 struct DatabaseSchema {
     title_property: String,
     email_property: Option<String>,
-    property_names: HashSet<String>,
+    properties: HashMap<String, NotionProperty>,
+    actual_names_by_normalized: HashMap<String, String>,
+}
+
+impl DatabaseSchema {
+    fn resolve_property(&self, candidates: &[&str]) -> Option<(&str, &NotionProperty)> {
+        for candidate in candidates {
+            let normalized = normalize_property_name(candidate);
+            let Some(actual_name) = self.actual_names_by_normalized.get(&normalized) else {
+                continue;
+            };
+            let Some(property) = self.properties.get(actual_name) else {
+                continue;
+            };
+            return Some((actual_name.as_str(), property));
+        }
+        None
+    }
 }
 
 impl NotionClient {
@@ -148,29 +165,35 @@ impl NotionClient {
             schema: DatabaseSchema {
                 title_property: "Name".to_string(),
                 email_property: Some("Email".to_string()),
-                property_names: HashSet::new(),
+                properties: HashMap::new(),
+                actual_names_by_normalized: HashMap::new(),
             },
         };
         let database: NotionDatabase = client.api_call("GET", &format!("/databases/{}", config.database_id), None)?;
 
         let mut title_property = None;
         let mut email_property = None;
-        let mut property_names = HashSet::new();
+        let mut properties = HashMap::new();
+        let mut actual_names_by_normalized = HashMap::new();
 
         for (name, property) in database.properties {
-            property_names.insert(name.clone());
+            actual_names_by_normalized
+                .entry(normalize_property_name(&name))
+                .or_insert_with(|| name.clone());
             if property.property_type == "title" && title_property.is_none() {
                 title_property = Some(name.clone());
             }
             if property.property_type == "email" && email_property.is_none() {
                 email_property = Some(name.clone());
             }
+            properties.insert(name, property);
         }
 
         Ok(DatabaseSchema {
             title_property: title_property.unwrap_or_else(|| "Name".to_string()),
             email_property,
-            property_names,
+            properties,
+            actual_names_by_normalized,
         })
     }
 
@@ -336,45 +359,106 @@ impl NotionClient {
     }
 
     /// Convert student profile payload to Notion property updates.
-    fn build_property_updates(&self, payload: &serde_json::Value) -> serde_json::Value {
+    fn build_property_updates(&self, title: &str, payload: &serde_json::Value) -> serde_json::Value {
         let props = payload.get("properties").cloned().unwrap_or_default();
         let mut notion_props = serde_json::Map::new();
 
-        let add_text = |map: &mut serde_json::Map<String, serde_json::Value>, key: &str, val: &serde_json::Value| {
-            if let Some(s) = val.as_str() {
-                if !s.is_empty() {
-                    map.insert(
-                        key.to_string(),
-                        serde_json::json!({ "rich_text": [{ "text": { "content": s } }] }),
-                    );
-                }
-            }
-        };
-
-        if self.schema.property_names.contains("Birthplace") {
-            add_text(&mut notion_props, "Birthplace", &props["Birthplace"]);
-        }
-        if self.schema.property_names.contains("DoB") {
-            add_text(&mut notion_props, "DoB", &props["DoB"]);
+        if !title.trim().is_empty() {
+            notion_props.insert(
+                self.schema.title_property.clone(),
+                serde_json::json!({
+                    "title": [{ "text": { "content": title.trim() } }]
+                }),
+            );
         }
 
-        // Hashtags: join array into comma-separated text
-        if let Some(tags) = props.get("Hashtags") {
-            let tag_str = if let Some(arr) = tags.as_array() {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                tags.as_str().unwrap_or_default().to_string()
-            };
-            if !tag_str.is_empty() && self.schema.property_names.contains("Hashtag") {
+        if let Some(email_property) = &self.schema.email_property {
+            if let Some(email) = payload
+                .get("email")
+                .and_then(|v| v.as_str())
+                .or_else(|| payload.get("generated_email").and_then(|v| v.as_str()))
+                .filter(|value| !value.trim().is_empty())
+            {
                 notion_props.insert(
-                    "Hashtag".to_string(),
-                    serde_json::json!({ "rich_text": [{ "text": { "content": tag_str } }] }),
+                    email_property.clone(),
+                    serde_json::json!({ "email": email.trim() }),
                 );
             }
         }
+
+        let add_text = |map: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: Option<String>| {
+            if let Some(value) = value.filter(|text| !text.trim().is_empty()) {
+                map.insert(
+                    key.to_string(),
+                    serde_json::json!({ "rich_text": [{ "text": { "content": value } }] }),
+                );
+            }
+        };
+
+        let add_text_if_exists = |
+            map: &mut serde_json::Map<String, serde_json::Value>,
+            candidates: &[&str],
+            value: Option<String>,
+        | {
+            let Some(value) = value.filter(|text| !text.trim().is_empty()) else {
+                return;
+            };
+            let Some((property_name, property)) = self.schema.resolve_property(candidates) else {
+                return;
+            };
+            match property.property_type.as_str() {
+                "url" if value.starts_with("http://") || value.starts_with("https://") => {
+                    map.insert(property_name.to_string(), serde_json::json!({ "url": value }));
+                }
+                "email" if value.contains('@') => {
+                    map.insert(property_name.to_string(), serde_json::json!({ "email": value }));
+                }
+                "date" => {
+                    map.insert(property_name.to_string(), serde_json::json!({
+                        "date": {
+                            "start": value,
+                        }
+                    }));
+                }
+                "status" => {
+                    map.insert(property_name.to_string(), serde_json::json!({
+                        "status": {
+                            "name": value,
+                        }
+                    }));
+                }
+                _ => add_text(map, property_name, Some(value)),
+            }
+        };
+
+        let add_checkbox_if_exists = |
+            map: &mut serde_json::Map<String, serde_json::Value>,
+            candidates: &[&str],
+            value: Option<bool>,
+        | {
+            let Some(value) = value else {
+                return;
+            };
+            let Some((property_name, property)) = self.schema.resolve_property(candidates) else {
+                return;
+            };
+            if property.property_type == "checkbox" {
+                map.insert(
+                    property_name.to_string(),
+                    serde_json::json!({ "checkbox": value }),
+                );
+            }
+        };
+
+        add_text_if_exists(&mut notion_props, &["Birthplace"], json_text(&props["Birthplace"]));
+        add_text_if_exists(&mut notion_props, &["DoB"], json_text(&props["DoB"]));
+
+        let tag_str = combine_list_texts([
+            json_list_values(props.get("Hashtags")),
+            json_list_values(payload.get("attributes")),
+        ]);
+        add_text_if_exists(&mut notion_props, &["Hashtag"], tag_str.clone());
+        add_text_if_exists(&mut notion_props, &["Hashtags"], tag_str);
 
         // Merge Major + Interests
         let mut major_interests = Vec::new();
@@ -390,12 +474,85 @@ impl NotionClient {
                 }
             }
         }
-        if !major_interests.is_empty() && self.schema.property_names.contains("Major_Interests") {
-            notion_props.insert(
-                "Major_Interests".to_string(),
-                serde_json::json!({ "rich_text": [{ "text": { "content": major_interests.join(", ") } }] }),
-            );
+        add_text_if_exists(
+            &mut notion_props,
+            &["Major_Interests", "Major_interests"],
+            combine_list_texts([major_interests]),
+        );
+
+        for key in [
+            "Nickname",
+            "Major",
+            "Affiliation",
+            "MBTI",
+            "SNS",
+            "Dislikes",
+            "New Challenges",
+            "Ask Me About",
+            "Turning Point",
+            "BTW",
+            "Message",
+        ] {
+            add_text_if_exists(&mut notion_props, &[key], json_text(&props[key]));
         }
+
+        for key in ["Hobbies", "Interests", "Likes"] {
+            add_text_if_exists(&mut notion_props, &[key], json_list_text(props.get(key)));
+        }
+
+        add_text_if_exists(
+            &mut notion_props,
+            &["Attributes"],
+            json_list_text(payload.get("attributes")),
+        );
+        add_text_if_exists(
+            &mut notion_props,
+            &["DOKP Person ID"],
+            payload
+                .pointer("/_dokp/person_id")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        );
+        add_text_if_exists(
+            &mut notion_props,
+            &["Source Slide URL"],
+            payload
+                .pointer("/_dokp/source_slide_url")
+                .and_then(|value| value.as_str())
+                .or_else(|| payload.get("source_canonical_uri").and_then(|value| value.as_str()))
+                .map(ToOwned::to_owned),
+        );
+        add_text_if_exists(
+            &mut notion_props,
+            &["Last Synced At"],
+            payload
+                .pointer("/_dokp/last_synced_at")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        );
+        add_text_if_exists(
+            &mut notion_props,
+            &["Projection Version"],
+            payload
+                .pointer("/_dokp/projection_version")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        );
+        add_text_if_exists(
+            &mut notion_props,
+            &["Status"],
+            payload
+                .pointer("/_dokp/status")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        );
+        add_checkbox_if_exists(
+            &mut notion_props,
+            &["Visibility"],
+            payload
+                .pointer("/_dokp/visibility")
+                .and_then(|value| value.as_bool()),
+        );
 
         serde_json::Value::Object(notion_props)
     }
@@ -428,7 +585,7 @@ impl SaaSWriteAdapter for NotionClient {
         };
 
         // Update page properties
-        let property_updates = self.build_property_updates(&record.payload);
+        let property_updates = self.build_property_updates(&record.title, &record.payload);
         if property_updates.as_object().is_some_and(|m| !m.is_empty()) {
             self.update_page_properties(&page_id, &property_updates)?;
         }
@@ -592,6 +749,32 @@ fn render_payload_blocks(data: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut blocks = Vec::new();
     let props = data.get("properties").cloned().unwrap_or_default();
 
+    let mut source_lines = Vec::new();
+    if let Some(email) = data
+        .get("email")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get("generated_email").and_then(|v| v.as_str()))
+    {
+        source_lines.push(format!("Email: {email}"));
+    }
+    if let Some(uri) = data.get("source_canonical_uri").and_then(|v| v.as_str()) {
+        source_lines.push(format!("Google Slides: {uri}"));
+    }
+    if let Some(document_id) = data.get("source_document_id").and_then(|v| v.as_str()) {
+        source_lines.push(format!("Document ID: {document_id}"));
+    }
+    if !source_lines.is_empty() {
+        blocks.push(serde_json::json!({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{ "text": { "content": source_lines.join("\n") } }],
+                "icon": { "emoji": "🔎" },
+                "color": "blue_background"
+            }
+        }));
+    }
+
     // Profile pic
     if let Some(pic) = data.get("profile_pic") {
         if let Some(url) = pic.get("url").and_then(|v| v.as_str()) {
@@ -645,12 +828,43 @@ fn render_payload_blocks(data: &serde_json::Value) -> Vec<serde_json::Value> {
         if !bio.is_empty() {
             blocks.push(serde_json::json!({
                 "object": "block",
+                "type": "heading_3",
+                "heading_3": { "rich_text": [{ "text": { "content": "About" } }] }
+            }));
+            blocks.push(serde_json::json!({
+                "object": "block",
                 "type": "paragraph",
                 "paragraph": {
                     "rich_text": [{ "text": { "content": bio } }]
                 }
             }));
         }
+    }
+
+    let highlights = [
+        ("Hobbies", json_list_text(props.get("Hobbies"))),
+        ("Interests", json_list_text(props.get("Interests"))),
+        ("Hashtags", json_list_text(props.get("Hashtags"))),
+        ("Attributes", json_list_text(data.get("attributes"))),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| value.map(|value| format!("{label}: {value}")))
+    .collect::<Vec<_>>();
+    if !highlights.is_empty() {
+        blocks.push(serde_json::json!({
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": { "rich_text": [{ "text": { "content": "Highlights" } }] }
+        }));
+        blocks.push(serde_json::json!({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{ "text": { "content": highlights.join("\n") } }],
+                "icon": { "emoji": "✨" },
+                "color": "yellow_background"
+            }
+        }));
     }
 
     // Likes
@@ -780,6 +994,56 @@ fn render_payload_blocks(data: &serde_json::Value) -> Vec<serde_json::Value> {
     blocks
 }
 
+fn json_text(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+}
+
+fn json_list_values(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    if let Some(array) = value.as_array() {
+        array
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        json_text(value).into_iter().collect()
+    }
+}
+
+fn json_list_text(value: Option<&serde_json::Value>) -> Option<String> {
+    combine_list_texts([json_list_values(value)])
+}
+
+fn combine_list_texts<const N: usize>(groups: [Vec<String>; N]) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for value in groups.into_iter().flatten() {
+        let key = normalize_property_name(&value);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        merged.push(value);
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged.join(", "))
+    }
+}
+
+fn normalize_property_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -789,16 +1053,48 @@ mod tests {
     use super::*;
 
     fn fixture_client() -> NotionClient {
+        let properties = [
+            ("Birthplace", "rich_text"),
+            ("Major_interests", "rich_text"),
+            ("Hashtag", "rich_text"),
+            ("DOKP Person ID", "rich_text"),
+            ("Source Slide URL", "url"),
+            ("Last Synced At", "date"),
+            ("Projection Version", "rich_text"),
+            ("Status", "status"),
+            ("Visibility", "checkbox"),
+        ]
+        .into_iter()
+        .map(|(name, property_type)| {
+            (
+                name.to_string(),
+                NotionProperty {
+                    property_type: property_type.to_string(),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
         NotionClient {
             http: Client::builder().build().unwrap(),
             config: NotionConfig::new("test-token", "test-db"),
             schema: DatabaseSchema {
                 title_property: "Name".into(),
                 email_property: Some("Email".into()),
-                property_names: ["Birthplace", "Major_Interests", "Hashtag"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
+                actual_names_by_normalized: [
+                    "Birthplace",
+                    "Major_interests",
+                    "Hashtag",
+                    "DOKP Person ID",
+                    "Source Slide URL",
+                    "Last Synced At",
+                    "Projection Version",
+                    "Status",
+                    "Visibility",
+                ]
+                .into_iter()
+                .map(|name| (normalize_property_name(name), name.to_string()))
+                .collect(),
+                properties,
             },
         }
     }
@@ -810,6 +1106,8 @@ mod tests {
                 "url": "https://example.com/pic.jpg",
                 "description": "Photo"
             },
+            "email": "taro@example.jp",
+            "source_canonical_uri": "https://docs.google.com/presentation/d/test",
             "bio_text": "Hello world",
             "properties": {
                 "Nickname": "Taro",
@@ -817,10 +1115,10 @@ mod tests {
             }
         });
         let blocks = render_payload_blocks(&payload);
-        assert!(blocks.len() >= 3); // image + callout + bio
-        assert_eq!(blocks[0]["type"], "image");
-        assert_eq!(blocks[1]["type"], "callout");
-        assert_eq!(blocks[2]["type"], "paragraph");
+        assert!(blocks.len() >= 5);
+        assert_eq!(blocks[0]["type"], "callout");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[2]["type"], "callout");
     }
 
     #[test]
@@ -858,9 +1156,68 @@ mod tests {
                 "Birthplace": "Tokyo",
             }
         });
-        let props = fixture_client().build_property_updates(&payload);
-        assert!(props.get("Major_Interests").is_some());
+        let props = fixture_client().build_property_updates("田中太郎", &payload);
+        assert!(props.get("Major_interests").is_some());
         assert!(props.get("Birthplace").is_some());
+        assert!(props.get("Name").is_some());
+    }
+
+    #[test]
+    fn build_property_updates_populates_metadata_and_attribute_fallbacks() {
+        let payload = serde_json::json!({
+            "attributes": ["AI", "ML"],
+            "_dokp": {
+                "person_id": "person:alice",
+                "projection_version": "proj:person-page@0.1.0",
+                "last_synced_at": "2026-03-28T11:00:00Z",
+                "source_slide_url": "https://example.com/slide",
+                "status": "Done",
+                "visibility": true
+            },
+            "properties": {
+                "Hashtags": ["#rust"],
+                "Major": "CS",
+                "Interests": ["Robotics"]
+            }
+        });
+
+        let props = fixture_client().build_property_updates("田中太郎", &payload);
+
+        assert_eq!(
+            props["Hashtag"]["rich_text"][0]["text"]["content"].as_str(),
+            Some("#rust, AI, ML")
+        );
+        assert_eq!(
+            props["DOKP Person ID"]["rich_text"][0]["text"]["content"].as_str(),
+            Some("person:alice")
+        );
+        assert_eq!(
+            props["Source Slide URL"]["url"].as_str(),
+            Some("https://example.com/slide")
+        );
+        assert_eq!(
+            props["Last Synced At"]["date"]["start"].as_str(),
+            Some("2026-03-28T11:00:00Z")
+        );
+        assert_eq!(
+            props["Projection Version"]["rich_text"][0]["text"]["content"].as_str(),
+            Some("proj:person-page@0.1.0")
+        );
+        assert_eq!(props["Status"]["status"]["name"].as_str(), Some("Done"));
+        assert_eq!(props["Visibility"]["checkbox"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn render_payload_adds_highlights_section() {
+        let payload = serde_json::json!({
+            "attributes": ["AI", "ML"],
+            "properties": {
+                "Hobbies": ["写真", "散歩"],
+                "Hashtags": ["rust", "slides"]
+            }
+        });
+        let blocks = render_payload_blocks(&payload);
+        assert!(blocks.iter().any(|block| block["type"] == "heading_3" && block.to_string().contains("Highlights")));
     }
 
     #[test]

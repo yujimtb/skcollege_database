@@ -143,6 +143,7 @@ impl SlackClient for HttpSlackClient {
         &self,
         channel_id: &str,
         thread_ts: &str,
+        oldest: Option<&str>,
     ) -> Result<Vec<SlackMessage>, AdapterError> {
         let channel_name = self.conversation_name(channel_id)?;
         let mut messages = Vec::new();
@@ -150,6 +151,9 @@ impl SlackClient for HttpSlackClient {
 
         loop {
             let mut query = vec![("channel", channel_id), ("ts", thread_ts)];
+            if let Some(oldest) = oldest {
+                query.push(("oldest", oldest));
+            }
             if let Some(cursor_value) = cursor.as_deref() {
                 query.push(("cursor", cursor_value));
             }

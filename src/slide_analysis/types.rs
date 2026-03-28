@@ -54,6 +54,74 @@ pub struct StudentProfile {
     pub companion_to_slide_object_id: Option<String>,
 }
 
+impl StudentProfile {
+    pub fn normalize_in_place(&mut self) {
+        self.email = normalize_email(self.email.take());
+        self.generated_email = normalize_email(self.generated_email.take());
+        if self.email.is_some() {
+            self.generated_email = None;
+        }
+
+        self.name = normalize_required_text(std::mem::take(&mut self.name));
+        self.bio_text = normalize_optional_text(self.bio_text.take());
+
+        self.profile_pic = self.profile_pic.take().and_then(|mut pic| {
+            pic.normalize_in_place();
+            pic.is_meaningful().then_some(pic)
+        });
+
+        for image in &mut self.gallery_images {
+            image.normalize_in_place();
+        }
+        self.gallery_images.retain(GalleryImage::is_meaningful);
+
+        self.properties.normalize_in_place();
+        normalize_string_list(&mut self.attributes);
+
+        self.source_slide_object_id = normalize_optional_text(self.source_slide_object_id.take());
+        self.source_document_id = normalize_optional_text(self.source_document_id.take());
+        self.source_canonical_uri = normalize_url(self.source_canonical_uri.take());
+        self.thumbnail_blob_ref = normalize_optional_text(self.thumbnail_blob_ref.take());
+        self.thumbnail_url = normalize_url(self.thumbnail_url.take());
+        self.companion_to_slide_object_id =
+            normalize_optional_text(self.companion_to_slide_object_id.take());
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.normalize_in_place();
+        self
+    }
+
+    pub fn richness_score(&self) -> usize {
+        let mut score = 0usize;
+
+        if self.email.is_some() {
+            score += 10;
+        }
+        if self.generated_email.is_some() {
+            score += 4;
+        }
+        if !self.name.trim().is_empty() {
+            score += 4;
+        }
+        if self.bio_text.as_ref().is_some_and(|text| !text.trim().is_empty()) {
+            score += 12;
+        }
+        if self.profile_pic.is_some() {
+            score += 6;
+        }
+        score += self.gallery_images.len() * 2;
+        score += self.attributes.len();
+        score += self.properties.richness_score();
+
+        score
+    }
+
+    pub fn has_meaningful_content(&self) -> bool {
+        self.richness_score() > 0
+    }
+}
+
 /// Profile picture information.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfilePic {
@@ -63,6 +131,19 @@ pub struct ProfilePic {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+impl ProfilePic {
+    fn normalize_in_place(&mut self) {
+        self.description = normalize_optional_text(self.description.take());
+        self.url = normalize_url(self.url.take());
+    }
+
+    fn is_meaningful(&self) -> bool {
+        self.description.as_ref().is_some_and(|value| !value.is_empty())
+            || self.url.as_ref().is_some_and(|value| !value.is_empty())
+            || self.coordinates.is_some()
+    }
 }
 
 /// Image coordinates as percentage (0-100) from top-left.
@@ -81,6 +162,19 @@ pub struct GalleryImage {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+impl GalleryImage {
+    fn normalize_in_place(&mut self) {
+        self.description = normalize_optional_text(self.description.take());
+        self.url = normalize_url(self.url.take());
+    }
+
+    fn is_meaningful(&self) -> bool {
+        self.description.as_ref().is_some_and(|value| !value.is_empty())
+            || self.url.as_ref().is_some_and(|value| !value.is_empty())
+            || self.coordinates.is_some()
+    }
 }
 
 /// Structured student properties from AI extraction.
@@ -121,6 +215,58 @@ pub struct StudentProperties {
     pub btw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "Message")]
     pub message: Option<String>,
+}
+
+impl StudentProperties {
+    fn normalize_in_place(&mut self) {
+        self.nickname = normalize_optional_text(self.nickname.take());
+        self.birthplace = normalize_optional_text(self.birthplace.take());
+        self.dob = normalize_optional_text(self.dob.take());
+        self.major = normalize_optional_text(self.major.take());
+        self.affiliation = normalize_optional_text(self.affiliation.take());
+        self.mbti = normalize_optional_text(self.mbti.take()).map(|value| value.to_uppercase());
+        let sns = self.sns.take();
+        self.sns = normalize_url(sns.clone()).or_else(|| normalize_optional_text(sns));
+        normalize_string_list(&mut self.hobbies);
+        normalize_string_list(&mut self.interests);
+        normalize_string_list(&mut self.likes);
+        self.dislikes = normalize_optional_text(self.dislikes.take());
+        normalize_string_list(&mut self.hashtags);
+        self.new_challenges = normalize_optional_text(self.new_challenges.take());
+        self.ask_me_about = normalize_optional_text(self.ask_me_about.take());
+        self.turning_point = normalize_optional_text(self.turning_point.take());
+        self.btw = normalize_optional_text(self.btw.take());
+        self.message = normalize_optional_text(self.message.take());
+    }
+
+    fn richness_score(&self) -> usize {
+        let mut score = 0usize;
+        let scalar_fields = [
+            self.nickname.as_ref(),
+            self.birthplace.as_ref(),
+            self.dob.as_ref(),
+            self.major.as_ref(),
+            self.affiliation.as_ref(),
+            self.mbti.as_ref(),
+            self.sns.as_ref(),
+            self.dislikes.as_ref(),
+            self.new_challenges.as_ref(),
+            self.ask_me_about.as_ref(),
+            self.turning_point.as_ref(),
+            self.btw.as_ref(),
+            self.message.as_ref(),
+        ];
+        score += scalar_fields
+            .into_iter()
+            .filter(|value| value.is_some_and(|text| !text.trim().is_empty()))
+            .count()
+            * 3;
+        score += self.hobbies.len();
+        score += self.interests.len();
+        score += self.likes.len();
+        score += self.hashtags.len();
+        score
+    }
 }
 
 /// A slide analysis output: links an observation to the extracted profile
@@ -177,6 +323,79 @@ where
     })
 }
 
+fn normalize_required_text(value: String) -> String {
+    value.trim().to_string()
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() || is_placeholder_value(&value) {
+        return None;
+    }
+    Some(value)
+}
+
+fn normalize_email(value: Option<String>) -> Option<String> {
+    let value = normalize_optional_text(value)?
+        .trim_matches(|ch: char| matches!(ch, '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';'))
+        .to_lowercase();
+    if value.contains('@') {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn normalize_url(value: Option<String>) -> Option<String> {
+    let value = normalize_optional_text(value)?;
+    if value.starts_with("http://") || value.starts_with("https://") {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn normalize_string_list(values: &mut Vec<String>) {
+    let mut normalized = Vec::new();
+    for value in values.drain(..) {
+        for candidate in split_list_value(&value) {
+            let trimmed = candidate.trim();
+            if trimmed.is_empty() || is_placeholder_value(trimmed) {
+                continue;
+            }
+            if !normalized.iter().any(|existing: &String| existing.eq_ignore_ascii_case(trimmed)) {
+                normalized.push(trimmed.to_string());
+            }
+        }
+    }
+    *values = normalized;
+}
+
+fn split_list_value(value: &str) -> Vec<String> {
+    let normalized = value
+        .replace('\n', ",")
+        .replace('\r', ",")
+        .replace('・', ",")
+        .replace('•', ",")
+        .replace('，', ",")
+        .replace('、', ",")
+        .replace('/', ",");
+
+    normalized
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_placeholder_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "null" | "none" | "n/a" | "na" | "unknown" | "不明" | "未記載" | "未入力"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +426,48 @@ mod tests {
         let back: StudentProfile = serde_json::from_value(json).unwrap();
         assert_eq!(back.name, "田中太郎");
         assert_eq!(back.properties.nickname, Some("Taro".into()));
+    }
+
+    #[test]
+    fn normalize_in_place_splits_lists_and_cleans_placeholders() {
+        let mut profile = StudentProfile {
+            email: Some(" TANAKA@EXAMPLE.JP ".into()),
+            generated_email: Some("none".into()),
+            name: " 田中太郎 ".into(),
+            bio_text: Some("  Hello  ".into()),
+            profile_pic: Some(ProfilePic {
+                coordinates: None,
+                description: Some(" ".into()),
+                url: Some("https://example.com/pic.png".into()),
+            }),
+            gallery_images: vec![GalleryImage {
+                coordinates: None,
+                description: Some("Photo".into()),
+                url: Some(" ".into()),
+            }],
+            properties: StudentProperties {
+                hobbies: vec!["music, soccer".into(), "Music".into()],
+                hashtags: vec!["rust / ai".into(), "unknown".into()],
+                mbti: Some("enfp".into()),
+                ..Default::default()
+            },
+            attributes: vec![" AI・ML ".into(), "ai".into()],
+            source_slide_object_id: None,
+            source_document_id: None,
+            source_canonical_uri: None,
+            thumbnail_blob_ref: None,
+            thumbnail_url: None,
+            companion_to_slide_object_id: None,
+        };
+
+        profile.normalize_in_place();
+
+        assert_eq!(profile.email.as_deref(), Some("tanaka@example.jp"));
+        assert_eq!(profile.generated_email, None);
+        assert_eq!(profile.name, "田中太郎");
+        assert_eq!(profile.properties.hobbies, vec!["music", "soccer"]);
+        assert_eq!(profile.properties.hashtags, vec!["rust", "ai"]);
+        assert_eq!(profile.properties.mbti.as_deref(), Some("ENFP"));
+        assert_eq!(profile.attributes, vec!["AI", "ML"]);
     }
 }

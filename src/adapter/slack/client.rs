@@ -117,6 +117,7 @@ pub trait SlackClient {
         &self,
         channel_id: &str,
         thread_ts: &str,
+        oldest: Option<&str>,
     ) -> Result<Vec<SlackMessage>, AdapterError>;
 
     /// Fetch channel info (for snapshots).
@@ -192,8 +193,13 @@ impl SlackClient for FixtureSlackClient {
         &self,
         _channel_id: &str,
         thread_ts: &str,
+        oldest: Option<&str>,
     ) -> Result<Vec<SlackMessage>, AdapterError> {
-        Ok(self.replies.get(thread_ts).cloned().unwrap_or_default())
+        let mut replies = self.replies.get(thread_ts).cloned().unwrap_or_default();
+        if let Some(oldest) = oldest {
+            replies.retain(|reply| slack_ts_value(&reply.ts) > slack_ts_value(oldest));
+        }
+        Ok(replies)
     }
 
     fn conversations_info(
@@ -215,4 +221,8 @@ impl SlackClient for FixtureSlackClient {
             .cloned()
             .ok_or_else(|| AdapterError::Other(format!("file {} not found", file.id)))
     }
+}
+
+fn slack_ts_value(value: &str) -> f64 {
+    value.parse::<f64>().unwrap_or(0.0)
 }

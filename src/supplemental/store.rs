@@ -19,6 +19,14 @@ pub struct VersionedRecord {
     pub record: SupplementalRecord,
 }
 
+/// Rollback token for a successful upsert.
+#[derive(Debug, Clone)]
+pub struct UpsertRollback {
+    pub id: SupplementalId,
+    previous: Option<VersionedRecord>,
+    history_len: usize,
+}
+
 /// In-memory supplemental store with mutability enforcement.
 #[derive(Debug, Default)]
 pub struct SupplementalStore {
@@ -83,6 +91,34 @@ impl SupplementalStore {
         }
 
         self.add(record, lake)
+    }
+
+    /// Upsert a record and return a token that can restore the previous state.
+    pub fn upsert_with_rollback(
+        &mut self,
+        record: SupplementalRecord,
+        lake: &LakeStore,
+    ) -> Result<UpsertRollback, DomainError> {
+        let rollback = UpsertRollback {
+            id: record.id.clone(),
+            previous: self.records.get(&record.id.0).cloned(),
+            history_len: self.history.len(),
+        };
+        self.upsert(record, lake)?;
+        Ok(rollback)
+    }
+
+    /// Restore the store state captured before `upsert_with_rollback`.
+    pub fn rollback_upsert(&mut self, rollback: UpsertRollback) {
+        self.history.truncate(rollback.history_len);
+        match rollback.previous {
+            Some(previous) => {
+                self.records.insert(rollback.id.0.clone(), previous);
+            }
+            None => {
+                self.records.remove(&rollback.id.0);
+            }
+        }
     }
 
     fn validate_record(
@@ -380,5 +416,38 @@ mod tests {
         let rec = store.get(&id).unwrap();
         assert!(rec.consent_metadata.is_some());
         assert!(rec.consent_metadata.as_ref().unwrap().retracted_at.is_some());
+    }
+
+    #[test]
+    fn rollback_upsert_removes_new_record() {
+        let (lake, obs_id) = make_lake_with_obs();
+        let mut store = SupplementalStore::new();
+        let record = make_record(&obs_id, Mutability::ManagedCache);
+        let rollback = store.upsert_with_rollback(record.clone(), &lake).unwrap();
+
+        assert!(store.get(&record.id).is_some());
+        store.rollback_upsert(rollback);
+        assert!(store.get(&record.id).is_none());
+        assert!(store.versions(&record.id).is_empty());
+    }
+
+    #[test]
+    fn rollback_upsert_restores_previous_version() {
+        let (lake, obs_id) = make_lake_with_obs();
+        let mut store = SupplementalStore::new();
+        let mut record = make_record(&obs_id, Mutability::ManagedCache);
+        let id = store.add(record.clone(), &lake).unwrap();
+
+        record.payload = serde_json::json!({"text": "updated"});
+        let rollback = store.upsert_with_rollback(record, &lake).unwrap();
+
+        assert_eq!(store.get(&id).unwrap().record_version.as_deref(), Some("2"));
+        assert_eq!(store.versions(&id).len(), 2);
+
+        store.rollback_upsert(rollback);
+
+        assert_eq!(store.get(&id).unwrap().payload["text"], "hello");
+        assert!(store.get(&id).unwrap().record_version.is_none());
+        assert_eq!(store.versions(&id).len(), 1);
     }
 }

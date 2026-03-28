@@ -118,17 +118,18 @@ impl PersonPageProjector {
             .iter()
             .map(|observation| (observation.id.clone(), observation))
             .collect();
-        let mut results: HashMap<String, (DateTime<Utc>, FrontendProfile)> = HashMap::new();
+        let mut results: HashMap<String, (usize, DateTime<Utc>, FrontendProfile)> = HashMap::new();
 
         for record in supplemental_records {
             if record.kind != "slide-analysis" {
                 continue;
             }
 
-            let profile = match serde_json::from_value::<StudentProfile>(record.payload.clone()) {
+            let mut profile = match serde_json::from_value::<StudentProfile>(record.payload.clone()) {
                 Ok(profile) => profile,
                 Err(_) => continue,
             };
+            profile.normalize_in_place();
             if profile.companion_to_slide_object_id.is_some() {
                 continue;
             }
@@ -177,15 +178,26 @@ impl PersonPageProjector {
             };
 
             let created_at = record.created_at;
+            let richness_score = frontend_profile.profile.richness_score();
             match results.get(person_id.as_str()) {
-                Some((current_created_at, _)) if *current_created_at >= created_at => {}
+                Some((current_score, current_created_at, _))
+                    if *current_score > richness_score
+                        || (*current_score == richness_score && *current_created_at >= created_at) => {}
                 _ => {
-                    results.insert(person_id.as_str().to_string(), (created_at, frontend_profile));
+                    results.insert(
+                        person_id.as_str().to_string(),
+                        (richness_score, created_at, frontend_profile),
+                    );
                 }
             }
         }
 
         results
+            .into_iter()
+            .map(|(person_id, (_, created_at, frontend_profile))| {
+                (person_id, (created_at, frontend_profile))
+            })
+            .collect()
     }
 
     fn person_id_from_slide_observation(
@@ -475,7 +487,7 @@ mod tests {
     use crate::domain::*;
     use crate::governance::types::ConfidenceLevel;
     use crate::identity::types::*;
-    use crate::slide_analysis::types::StudentProfile;
+    use crate::slide_analysis::types::{StudentProfile, StudentProperties};
 
     fn slack_obs(user_id: &str, email: &str, text: &str, channel: &str, key: &str) -> Observation {
         Observation {
@@ -741,6 +753,101 @@ mod tests {
                 .identities
                 .iter()
                 .all(|identity| !identity.external_id.starts_with("document:gslides:"))
+        );
+    }
+
+    #[test]
+    fn richer_frontend_profile_wins_over_newer_sparse_profile() {
+        let identity = sample_identity();
+        let observation = gslides_obs(&["tanaka@example.jp"], "tanaka@example.jp", "g1");
+
+        let richer = SupplementalRecord {
+            id: SupplementalId::new("sup:slide-analysis:rich"),
+            kind: "slide-analysis".into(),
+            derived_from: InputAnchorSet {
+                observations: vec![observation.id.clone()],
+                blobs: vec![],
+                supplementals: vec![],
+            },
+            payload: serde_json::to_value(StudentProfile {
+                email: Some("tanaka@example.jp".into()),
+                generated_email: None,
+                name: "田中太郎".into(),
+                bio_text: Some("自己紹介です".into()),
+                profile_pic: None,
+                gallery_images: vec![],
+                properties: StudentProperties {
+                    nickname: Some("Taro".into()),
+                    ..Default::default()
+                },
+                attributes: vec![],
+                source_slide_object_id: Some("slide-1".into()),
+                source_document_id: Some("document:gslides:g1#slide:slide-1".into()),
+                source_canonical_uri: None,
+                thumbnail_blob_ref: None,
+                thumbnail_url: Some("https://example.com/rich.png".into()),
+                companion_to_slide_object_id: None,
+            })
+            .unwrap(),
+            created_by: ActorRef::new("actor:test"),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-03-24T12:00:00Z")
+                .unwrap()
+                .to_utc(),
+            mutability: Mutability::ManagedCache,
+            record_version: Some("1".into()),
+            model_version: Some("fixture".into()),
+            consent_metadata: None,
+            lineage: None,
+        };
+
+        let sparse_newer = SupplementalRecord {
+            id: SupplementalId::new("sup:slide-analysis:sparse"),
+            kind: "slide-analysis".into(),
+            derived_from: InputAnchorSet {
+                observations: vec![observation.id.clone()],
+                blobs: vec![],
+                supplementals: vec![],
+            },
+            payload: serde_json::to_value(StudentProfile {
+                email: Some("tanaka@example.jp".into()),
+                generated_email: None,
+                name: "田中太郎".into(),
+                bio_text: None,
+                profile_pic: None,
+                gallery_images: vec![],
+                properties: Default::default(),
+                attributes: vec![],
+                source_slide_object_id: Some("slide-2".into()),
+                source_document_id: Some("document:gslides:g1#slide:slide-2".into()),
+                source_canonical_uri: None,
+                thumbnail_blob_ref: None,
+                thumbnail_url: Some("https://example.com/sparse.png".into()),
+                companion_to_slide_object_id: None,
+            })
+            .unwrap(),
+            created_by: ActorRef::new("actor:test"),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-03-25T12:00:00Z")
+                .unwrap()
+                .to_utc(),
+            mutability: Mutability::ManagedCache,
+            record_version: Some("1".into()),
+            model_version: Some("fixture".into()),
+            consent_metadata: None,
+            lineage: None,
+        };
+
+        let output = PersonPageProjector::project(
+            &identity,
+            &[observation],
+            &[&sparse_newer, &richer],
+        );
+
+        assert_eq!(
+            output.profiles[0]
+                .frontend_profile
+                .as_ref()
+                .and_then(|profile| profile.profile.bio_text.as_deref()),
+            Some("自己紹介です")
         );
     }
 }
