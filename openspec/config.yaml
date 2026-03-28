@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  Project: DOKP (Dormitory Observation & Knowledge Platform)
+  Project: LETHE (Dormitory Observation & Knowledge Platform)
   Domain: 学生寮データ統合基盤 & 学術的知識資産プラットフォーム
 
   Architecture: Functional Core / Imperative Shell

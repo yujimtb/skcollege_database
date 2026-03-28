@@ -1,8 +1,8 @@
-# DOKP Runtime Reference Architecture
+# LETHE Runtime Reference Architecture
 
 ## Purpose
 
-この文書は、DOKP をどのような runtime topology で動かすと実装しやすいかを示す **reference implementation** です。  
+この文書は、LETHE をどのような runtime topology で動かすと実装しやすいかを示す **reference implementation** です。  
 ここでいう runtime は交換可能であり、守るべき本質は `plan.md` と `domain_algebra.md` の意味論と law です。
 
 ---
@@ -149,7 +149,7 @@ API layer は latest/pinned/cached の contract を明示します。
 
 ### 3.6 Sandbox / Draft Workspace
 
-Sandbox は DOKP の利用体験上かなり重要です。
+Sandbox は LETHE の利用体験上かなり重要です。
 
 - 非技術ユーザーが terminal なしで Projection を試作できる
 - coding agent が capability-scoped に spec や build を支援できる

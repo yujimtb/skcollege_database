@@ -1,4 +1,4 @@
-# DOKP Open Issues
+# LETHE Open Issues
 
 **Scope:** 設計ラウンドごとに浮上する論点を追跡する。
 

@@ -1,4 +1,4 @@
-# DOKP Open Issues — Round 2
+# LETHE Open Issues — Round 2
 
 **Date:** 2026-03-10
 **Scope:** Round 1 の回答を反映した後に浮上した、次の設計ラウンドで解決すべき論点

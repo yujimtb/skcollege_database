@@ -1,4 +1,4 @@
-# DOKP Multi-Agent Development Structure
+# LETHE Multi-Agent Development Structure
 
 ## Overview
 
@@ -127,7 +127,7 @@ Reviewer: law 違反を探す
 
 ---
 
-## DOKPレビュー・チェックリスト（Reviewer 用）
+## LETHEレビュー・チェックリスト（Reviewer 用）
 
 - [ ] append-only を破っていないか
 - [ ] authority model を暗黙にしていないか

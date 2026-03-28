@@ -1,8 +1,8 @@
-# DOKP — Copilot Project Instructions
+# LETHE — Copilot Project Instructions
 
 ## Project Overview
 
-Dormitory Observation & Knowledge Platform (DOKP): 学生寮に関わるあらゆる「観測（Observation）」を普遍的に蓄積し、そこから誰でも自由にデータベースを構築・合成できる開放的な知識基盤。
+Dormitory Observation & Knowledge Platform (LETHE): 学生寮に関わるあらゆる「観測（Observation）」を普遍的に蓄積し、そこから誰でも自由にデータベースを構築・合成できる開放的な知識基盤。
 
 ## Document Map
 

@@ -10,7 +10,7 @@
 
 ## 1. Module Purpose
 
-DOKP のすべてのデータ操作に対する **policy evaluation と capability control** を定義する。
+LETHE のすべてのデータ操作に対する **policy evaluation と capability control** を定義する。
 consent、access、filtering projection、agent capability、write review、retention、secret management を統一的に扱う。
 
 ---

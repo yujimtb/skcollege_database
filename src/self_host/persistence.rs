@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn persist_and_reload_observation() {
-        let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
+        let tmp = std::env::temp_dir().join(format!("lethe-test-{}", uuid::Uuid::now_v7()));
         let db = tmp.join("test.sqlite3");
         let blob_dir = tmp.join("blobs");
         let store = SqlitePersistence::open(&db, &blob_dir).unwrap();
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn duplicate_persist_observation_surfaces_constraint_error() {
-        let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
+        let tmp = std::env::temp_dir().join(format!("lethe-test-{}", uuid::Uuid::now_v7()));
         let db = tmp.join("test.sqlite3");
         let blob_dir = tmp.join("blobs");
         let store = SqlitePersistence::open(&db, &blob_dir).unwrap();
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn persist_and_reload_supplemental() {
-        let tmp = std::env::temp_dir().join(format!("dokp-test-{}", uuid::Uuid::now_v7()));
+        let tmp = std::env::temp_dir().join(format!("lethe-test-{}", uuid::Uuid::now_v7()));
         let db = tmp.join("test.sqlite3");
         let blob_dir = tmp.join("blobs");
         let store = SqlitePersistence::open(&db, &blob_dir).unwrap();

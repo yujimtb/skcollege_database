@@ -682,7 +682,7 @@ mod tests {
             schema: SchemaRef::new("schema:slide-analysis-result"),
             schema_version: SemVer::new("1.0.0"),
             observer: ObserverRef::new("obs:slide-analysis-projector"),
-            source_system: Some(SourceSystemRef::new("sys:dokp-internal")),
+            source_system: Some(SourceSystemRef::new("sys:lethe-internal")),
             actor: None,
             authority_model: AuthorityModel::LakeAuthoritative,
             capture_model: CaptureModel::Event,

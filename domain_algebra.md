@@ -1,4 +1,4 @@
-# DOKP Domain Algebra
+# LETHE Domain Algebra
 
 ## Purpose
 
@@ -13,7 +13,7 @@
 
 ### 1.1 Functional Core / Imperative Shell
 
-DOKP は次の原則で読むと最も安定します。
+LETHE は次の原則で読むと最も安定します。
 
 - **Functional Core:** Observation / Projection / Command / Policy を純粋関数で解釈する
 - **Imperative Shell:** source access、blob 保存、DB materialize、API 呼び出し、job 実行を副作用境界に押し出す
@@ -573,7 +573,7 @@ deriveDualReferencePlan(command, context) =
 ### 7.2 Practical Implication
 
 この law 群が守られていれば、技術スタックが変わっても設計意図は保たれます。  
-逆に、stack が同じでも law を破れば DOKP ではなくなります。
+逆に、stack が同じでも law を破れば LETHE ではなくなります。
 
 ---
 

@@ -108,7 +108,7 @@ ResolvedPerson =
 ## 5. Projection Spec
 
 ```yaml
-apiVersion: "dokp/v1"
+apiVersion: "lethe/v1"
 kind: "Projection"
 
 metadata:

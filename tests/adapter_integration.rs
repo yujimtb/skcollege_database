@@ -8,15 +8,15 @@
 //! 5. Replay produces identical results
 
 use chrono::Utc;
-use dokp::adapter::config::*;
-use dokp::adapter::gslides::client::*;
-use dokp::adapter::gslides::mapper::*;
-use dokp::adapter::slack::client::*;
-use dokp::adapter::slack::mapper::*;
-use dokp::adapter::traits::*;
-use dokp::domain::*;
-use dokp::lake::*;
-use dokp::registry::*;
+use lethe::adapter::config::*;
+use lethe::adapter::gslides::client::*;
+use lethe::adapter::gslides::mapper::*;
+use lethe::adapter::slack::client::*;
+use lethe::adapter::slack::mapper::*;
+use lethe::adapter::traits::*;
+use lethe::domain::*;
+use lethe::lake::*;
+use lethe::registry::*;
 use std::time::Duration;
 
 // ===========================================================================
@@ -46,7 +46,7 @@ fn setup_registry_for_slack() -> RegistryStore {
         ],
         authority_model: AuthorityModel::LakeAuthoritative,
         capture_model: CaptureModel::Event,
-        owner: "dokp".into(),
+        owner: "lethe".into(),
         trust_level: TrustLevel::Automated,
     })
     .unwrap();
@@ -114,7 +114,7 @@ fn setup_registry_for_gslides() -> RegistryStore {
         ],
         authority_model: AuthorityModel::SourceAuthoritative,
         capture_model: CaptureModel::Snapshot,
-        owner: "dokp".into(),
+        owner: "lethe".into(),
         trust_level: TrustLevel::Automated,
     })
     .unwrap();

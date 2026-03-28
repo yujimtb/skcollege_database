@@ -20,7 +20,7 @@ MVP の最終出力である個人ページ Projection の **API 設計、表示
 ### Projection 定義
 
 ```yaml
-apiVersion: "dokp/v1"
+apiVersion: "lethe/v1"
 kind: "Projection"
 metadata:
   id: "proj:person-page"

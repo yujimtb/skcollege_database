@@ -1,11 +1,11 @@
-# DOKP Module Spec Index
+# LETHE Module Spec Index
 
 **Version:** 1.0
 **Date:** 2026-03-10
 
 ## Purpose
 
-この文書は DOKP の仕様をモジュール単位に分割した一覧と、モジュール間の依存関係、マルチエージェント開発における担当マッピングを定義する。
+この文書は LETHE の仕様をモジュール単位に分割した一覧と、モジュール間の依存関係、マルチエージェント開発における担当マッピングを定義する。
 
 各モジュール仕様は `openspec/specs/` に配置され、OpenSpec の change workflow から参照される。
 

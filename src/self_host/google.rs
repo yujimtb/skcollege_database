@@ -293,13 +293,13 @@ impl GoogleTokenSource {
     fn exchange_refresh_token(&self, http: &Client) -> Result<String, AdapterError> {
 
         let client_id = self.config.client_id.clone().ok_or_else(|| AdapterError::AuthFailure {
-            message: "missing DOKP_GOOGLE_CLIENT_ID".to_string(),
+            message: "missing LETHE_GOOGLE_CLIENT_ID".to_string(),
         })?;
         let client_secret = self.config.client_secret.clone().ok_or_else(|| AdapterError::AuthFailure {
-            message: "missing DOKP_GOOGLE_CLIENT_SECRET".to_string(),
+            message: "missing LETHE_GOOGLE_CLIENT_SECRET".to_string(),
         })?;
         let refresh_token = self.config.refresh_token.clone().ok_or_else(|| AdapterError::AuthFailure {
-            message: "missing DOKP_GOOGLE_REFRESH_TOKEN".to_string(),
+            message: "missing LETHE_GOOGLE_REFRESH_TOKEN".to_string(),
         })?;
 
         let token_response = http

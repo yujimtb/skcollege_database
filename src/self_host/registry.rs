@@ -39,7 +39,7 @@ pub fn seed_registry() -> RegistryStore {
             ],
             authority_model: AuthorityModel::LakeAuthoritative,
             capture_model: CaptureModel::Event,
-            owner: "dokp".into(),
+            owner: "lethe".into(),
             trust_level: TrustLevel::Automated,
         })
         .unwrap();
@@ -56,16 +56,16 @@ pub fn seed_registry() -> RegistryStore {
             ],
             authority_model: AuthorityModel::SourceAuthoritative,
             capture_model: CaptureModel::Snapshot,
-            owner: "dokp".into(),
+            owner: "lethe".into(),
             trust_level: TrustLevel::Automated,
         })
         .unwrap();
 
     registry
         .register_source_system(SourceSystem {
-            id: SourceSystemRef::new("sys:dokp-internal"),
-            name: "DOKP Internal".into(),
-            provider: Some("DOKP".into()),
+            id: SourceSystemRef::new("sys:lethe-internal"),
+            name: "LETHE Internal".into(),
+            provider: Some("LETHE".into()),
             api_version: None,
             source_class: SourceClass::ImmutableText,
         })
@@ -75,12 +75,12 @@ pub fn seed_registry() -> RegistryStore {
             id: ObserverRef::new("obs:slide-analysis-projector"),
             name: "Slide Analysis Projector".into(),
             observer_type: ObserverType::Bot,
-            source_system: SourceSystemRef::new("sys:dokp-internal"),
+            source_system: SourceSystemRef::new("sys:lethe-internal"),
             adapter_version: SemVer::new("1.0.0"),
             schemas: vec![SchemaRef::new("schema:slide-analysis-result")],
             authority_model: AuthorityModel::LakeAuthoritative,
             capture_model: CaptureModel::Event,
-            owner: "dokp".into(),
+            owner: "lethe".into(),
             trust_level: TrustLevel::Automated,
         })
         .unwrap();

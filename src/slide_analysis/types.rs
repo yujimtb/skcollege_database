@@ -37,7 +37,7 @@ pub struct StudentProfile {
     /// Source slide object id inside the presentation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_slide_object_id: Option<String>,
-    /// Canonical DOKP document id for the analyzed slide.
+    /// Canonical LETHE document id for the analyzed slide.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_document_id: Option<String>,
     /// Canonical Google Slides URL for the source deck.

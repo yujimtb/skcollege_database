@@ -64,9 +64,9 @@ impl ErrorResponse {
     }
 }
 
-/// HTTP headers for DOKP responses (M14 §4.1).
+/// HTTP headers for LETHE responses (M14 §4.1).
 #[derive(Debug, Clone)]
-pub struct DokpHeaders {
+pub struct LetheHeaders {
     pub projection_id: String,
     pub read_mode: String,
     pub stale: bool,
@@ -75,7 +75,7 @@ pub struct DokpHeaders {
     pub lineage_ref: Option<String>,
 }
 
-impl From<&ProjectionMetadata> for DokpHeaders {
+impl From<&ProjectionMetadata> for LetheHeaders {
     fn from(meta: &ProjectionMetadata) -> Self {
         Self {
             projection_id: meta.projection_id.as_str().to_string(),
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn headers_from_metadata() {
         let meta = sample_meta();
-        let headers = DokpHeaders::from(&meta);
+        let headers = LetheHeaders::from(&meta);
         assert_eq!(headers.projection_id, "proj:person-page");
         assert!(!headers.stale);
         assert_eq!(headers.read_mode, "operational_latest");

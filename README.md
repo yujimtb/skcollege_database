@@ -1,4 +1,4 @@
-# DOKP — Dormitory Observation & Knowledge Platform
+# LETHE — Dormitory Observation & Knowledge Platform
 
 公開用リポジトリとして維持する前提で、機密情報とローカル実行データは Git 管理対象から外しています。運用上の扱いは [SECURITY.md](SECURITY.md) を参照してください。
 
@@ -84,27 +84,27 @@
 
 `.env`、OAuth client JSON、SQLite、blob directory はローカル専用です。公開リポジトリには含めません。
 
-- `DOKP_SLACK_BOT_TOKEN`
-- `DOKP_SLACK_THREAD_TOKEN` (任意。thread reply 読み取り用の token を分けたい場合)
-- `DOKP_SLACK_CHANNEL_IDS`
-- `DOKP_GOOGLE_PRESENTATION_IDS`
-- `DOKP_GOOGLE_ACCESS_TOKEN`
+- `LETHE_SLACK_BOT_TOKEN`
+- `LETHE_SLACK_THREAD_TOKEN` (任意。thread reply 読み取り用の token を分けたい場合)
+- `LETHE_SLACK_CHANNEL_IDS`
+- `LETHE_GOOGLE_PRESENTATION_IDS`
+- `LETHE_GOOGLE_ACCESS_TOKEN`
 
 access token を毎回手で入れたくない場合は、代わりに以下を設定します。
 
-- `DOKP_GOOGLE_CLIENT_ID`
-- `DOKP_GOOGLE_CLIENT_SECRET`
-- `DOKP_GOOGLE_REFRESH_TOKEN`
+- `LETHE_GOOGLE_CLIENT_ID`
+- `LETHE_GOOGLE_CLIENT_SECRET`
+- `LETHE_GOOGLE_REFRESH_TOKEN`
 
 Notion への write-back も確認したい場合は、以下も設定します。
 
-- `DOKP_NOTION_TOKEN`
-- `DOKP_NOTION_DATABASE_ID`
+- `LETHE_NOTION_TOKEN`
+- `LETHE_NOTION_DATABASE_ID`
 
 Google Slides の AI 抽出を有効にする場合は、以下も設定します。
 
-- `DOKP_GEMINI_API_KEY`
-- `DOKP_GEMINI_MODEL` (`gemini-2.5-flash` 既定)
+- `LETHE_GEMINI_API_KEY`
+- `LETHE_GEMINI_MODEL` (`gemini-2.5-flash` 既定)
 
 Notion database 側には title property が最低限 1 つ必要です。`Email` property は必須ではありませんが、ページ照合の安定性のため強く推奨します。
 
@@ -114,7 +114,7 @@ Notion database 側には title property が最低限 1 つ必要です。`Email
 - `DoB` (rich text)
 - `Hashtag` (rich text)
 - `Major_Interests` (rich text)
-- `DOKP Person ID` (rich text)
+- `LETHE Person ID` (rich text)
 - `Source Slide URL` (url / rich text)
 - `Last Synced At` (date / rich text)
 - `Projection Version` (rich text)
@@ -126,7 +126,7 @@ Notion database 側には title property が最低限 1 つ必要です。`Email
 ### Run
 
 ```bash
-cargo run --bin dokp-selfhost
+cargo run --bin lethe-selfhost
 ```
 
 起動後の主な endpoint:

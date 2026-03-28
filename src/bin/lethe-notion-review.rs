@@ -1,7 +1,7 @@
 use std::env;
 
-use dokp::self_host::app::AppService;
-use dokp::self_host::config::SelfHostConfig;
+use lethe::self_host::app::AppService;
+use lethe::self_host::config::SelfHostConfig;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options(env::args().skip(1))?;

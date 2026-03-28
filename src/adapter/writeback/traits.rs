@@ -8,7 +8,7 @@ use crate::adapter::error::AdapterError;
 /// A record to be written to an external SaaS destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteRecord {
-    /// Unique identifier for this record in the DOKP domain (e.g. person_id).
+    /// Unique identifier for this record in the LETHE domain (e.g. person_id).
     pub entity_id: String,
     /// Display name / title for the record.
     pub title: String,

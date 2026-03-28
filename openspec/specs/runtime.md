@@ -11,7 +11,7 @@
 
 ## 1. Module Purpose
 
-DOKP を実際に稼働させるための runtime topology・build isolation・sandbox・observer health 検知・
+LETHE を実際に稼働させるための runtime topology・build isolation・sandbox・observer health 検知・
 技術選定ガイドラインを定義する。
 
 > **Runtime Is Subordinate to Semantics:** 実装は交換可能であり、
@@ -117,7 +117,7 @@ DOKP を実際に稼働させるための runtime topology・build isolation・s
 
 ### 4.4 Sandbox / Draft Workspace
 
-**重要度:** 高 — DOKP の利用体験上のコア
+**重要度:** 高 — LETHE の利用体験上のコア
 
 - 非技術ユーザーが terminal なしで Projection を試作可能
 - coding agent が capability-scoped に spec / build を支援

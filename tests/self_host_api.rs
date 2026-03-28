@@ -2,19 +2,19 @@ use std::path::PathBuf;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use dokp::domain::{
+use lethe::domain::{
     AuthorityModel, CaptureModel, EntityRef, IdempotencyKey, Observation, ObserverRef, SchemaRef,
     SemVer, SourceSystemRef,
 };
-use dokp::self_host::app::AppService;
-use dokp::self_host::config::{GoogleConfig, SelfHostConfig, SlackConfig};
-use dokp::self_host::persistence::SqlitePersistence;
-use dokp::self_host::server::build_router;
+use lethe::self_host::app::AppService;
+use lethe::self_host::config::{GoogleConfig, SelfHostConfig, SlackConfig};
+use lethe::self_host::persistence::SqlitePersistence;
+use lethe::self_host::server::build_router;
 use tower::util::ServiceExt;
 
 fn temp_paths() -> (PathBuf, PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("dokp-self-host-test-{}", uuid::Uuid::now_v7()));
-    let db = root.join("dokp.sqlite3");
+    let root = std::env::temp_dir().join(format!("lethe-self-host-test-{}", uuid::Uuid::now_v7()));
+    let db = root.join("lethe.sqlite3");
     let blobs = root.join("blobs");
     (root, db, blobs)
 }

@@ -507,51 +507,35 @@ impl NotionClient {
         );
         add_text_if_exists(
             &mut notion_props,
-            &["DOKP Person ID"],
-            payload
-                .pointer("/_dokp/person_id")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
+            &["LETHE Person ID"],
+            metadata_value(payload, "person_id"),
         );
         add_text_if_exists(
             &mut notion_props,
             &["Source Slide URL"],
-            payload
-                .pointer("/_dokp/source_slide_url")
-                .and_then(|value| value.as_str())
+            metadata_str(payload, "source_slide_url")
                 .or_else(|| payload.get("source_canonical_uri").and_then(|value| value.as_str()))
                 .map(ToOwned::to_owned),
         );
         add_text_if_exists(
             &mut notion_props,
             &["Last Synced At"],
-            payload
-                .pointer("/_dokp/last_synced_at")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
+            metadata_value(payload, "last_synced_at"),
         );
         add_text_if_exists(
             &mut notion_props,
             &["Projection Version"],
-            payload
-                .pointer("/_dokp/projection_version")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
+            metadata_value(payload, "projection_version"),
         );
         add_text_if_exists(
             &mut notion_props,
             &["Status"],
-            payload
-                .pointer("/_dokp/status")
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
+            metadata_value(payload, "status"),
         );
         add_checkbox_if_exists(
             &mut notion_props,
             &["Visibility"],
-            payload
-                .pointer("/_dokp/visibility")
-                .and_then(|value| value.as_bool()),
+            metadata_bool(payload, "visibility"),
         );
 
         serde_json::Value::Object(notion_props)
@@ -1044,6 +1028,22 @@ fn normalize_property_name(value: &str) -> String {
         .collect()
 }
 
+fn metadata_pointer<'a>(payload: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
+    payload.pointer(&format!("/_lethe/{field}"))
+}
+
+fn metadata_str<'a>(payload: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    metadata_pointer(payload, field).and_then(|value| value.as_str())
+}
+
+fn metadata_value(payload: &serde_json::Value, field: &str) -> Option<String> {
+    metadata_str(payload, field).map(ToOwned::to_owned)
+}
+
+fn metadata_bool(payload: &serde_json::Value, field: &str) -> Option<bool> {
+    metadata_pointer(payload, field).and_then(|value| value.as_bool())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1057,7 +1057,7 @@ mod tests {
             ("Birthplace", "rich_text"),
             ("Major_interests", "rich_text"),
             ("Hashtag", "rich_text"),
-            ("DOKP Person ID", "rich_text"),
+            ("LETHE Person ID", "rich_text"),
             ("Source Slide URL", "url"),
             ("Last Synced At", "date"),
             ("Projection Version", "rich_text"),
@@ -1084,7 +1084,7 @@ mod tests {
                     "Birthplace",
                     "Major_interests",
                     "Hashtag",
-                    "DOKP Person ID",
+                    "LETHE Person ID",
                     "Source Slide URL",
                     "Last Synced At",
                     "Projection Version",
@@ -1166,7 +1166,7 @@ mod tests {
     fn build_property_updates_populates_metadata_and_attribute_fallbacks() {
         let payload = serde_json::json!({
             "attributes": ["AI", "ML"],
-            "_dokp": {
+            "_lethe": {
                 "person_id": "person:alice",
                 "projection_version": "proj:person-page@0.1.0",
                 "last_synced_at": "2026-03-28T11:00:00Z",
@@ -1188,7 +1188,7 @@ mod tests {
             Some("#rust, AI, ML")
         );
         assert_eq!(
-            props["DOKP Person ID"]["rich_text"][0]["text"]["content"].as_str(),
+            props["LETHE Person ID"]["rich_text"][0]["text"]["content"].as_str(),
             Some("person:alice")
         );
         assert_eq!(

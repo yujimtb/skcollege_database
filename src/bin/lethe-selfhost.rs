@@ -1,6 +1,6 @@
-use dokp::self_host::app::AppService;
-use dokp::self_host::config::SelfHostConfig;
-use dokp::self_host::server::build_router;
+use lethe::self_host::app::AppService;
+use lethe::self_host::config::SelfHostConfig;
+use lethe::self_host::server::build_router;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SelfHostConfig::from_env()?;
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let router = build_router(service.clone());
         let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-        println!("DOKP self-host listening on http://{}", config.bind_addr);
+        println!("LETHE self-host listening on http://{}", config.bind_addr);
         axum::serve(listener, router)
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;

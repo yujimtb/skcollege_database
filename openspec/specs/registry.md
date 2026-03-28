@@ -10,7 +10,7 @@
 
 ## 1. Module Purpose
 
-DOKP のすべてのメタデータを管理する **Registry** を定義する。
+LETHE のすべてのメタデータを管理する **Registry** を定義する。
 Registry は「何を」「どの形式で」「誰が」「どの契約で」観測し、「どのような Projection が存在するか」を一元管理する。
 
 ---

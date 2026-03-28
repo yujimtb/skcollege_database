@@ -1248,7 +1248,7 @@ impl AppService {
                 backoff: BackoffStrategy::Exponential,
                 max_wait: self.config.poll_interval,
             },
-            credential_ref: "env:DOKP_SLACK_BOT_TOKEN".into(),
+            credential_ref: "env:LETHE_SLACK_BOT_TOKEN".into(),
         }
     }
 
@@ -1278,7 +1278,7 @@ impl AppService {
                 backoff: BackoffStrategy::Exponential,
                 max_wait: self.config.poll_interval,
             },
-            credential_ref: "env:DOKP_GOOGLE_ACCESS_TOKEN".into(),
+            credential_ref: "env:LETHE_GOOGLE_ACCESS_TOKEN".into(),
         }
     }
 }
@@ -1682,7 +1682,7 @@ fn notion_write_record_for_person(
     let mut payload = serde_json::to_value(profile).ok()?;
     let payload_object = payload.as_object_mut()?;
     payload_object.insert(
-        "_dokp".to_string(),
+        "_lethe".to_string(),
         serde_json::json!({
             "person_id": person.person_id.as_str(),
             "projection_version": PERSON_PAGE_NOTION_PROJECTION_VERSION,
@@ -2344,7 +2344,7 @@ mod tests {
             ranked[0]
                 .write_record
                 .payload
-                .pointer("/_dokp/person_id")
+                .pointer("/_lethe/person_id")
                 .and_then(|value| value.as_str()),
             Some("person:a")
         );
@@ -2352,7 +2352,7 @@ mod tests {
             ranked[0]
                 .write_record
                 .payload
-                .pointer("/_dokp/projection_version")
+                .pointer("/_lethe/projection_version")
                 .and_then(|value| value.as_str()),
             Some(PERSON_PAGE_NOTION_PROJECTION_VERSION)
         );
@@ -2360,7 +2360,7 @@ mod tests {
             ranked[0]
                 .write_record
                 .payload
-                .pointer("/_dokp/status")
+                .pointer("/_lethe/status")
                 .and_then(|value| value.as_str()),
             Some("Done")
         );
@@ -2368,8 +2368,8 @@ mod tests {
 
     #[test]
     fn ingest_draft_rolls_back_lake_when_persistence_fails() {
-        let root = std::env::temp_dir().join(format!("dokp-self-host-test-{}", uuid::Uuid::now_v7()));
-        let db = root.join("dokp.sqlite3");
+        let root = std::env::temp_dir().join(format!("lethe-self-host-test-{}", uuid::Uuid::now_v7()));
+        let db = root.join("lethe.sqlite3");
         let blobs = root.join("blobs");
         let persistence = SqlitePersistence::open(&db, &blobs).unwrap();
         let persisted_observation = Observation {

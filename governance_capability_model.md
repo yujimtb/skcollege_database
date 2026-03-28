@@ -1,4 +1,4 @@
-# DOKP Governance and Capability Model
+# LETHE Governance and Capability Model
 
 ## Purpose
 
@@ -76,7 +76,7 @@ policy engine は少なくとも次を受け取ります。
 
 ### 3.1 Consent Is Not Only Person-Centric
 
-DOKP では consent / restriction を人物だけに閉じません。  
+LETHE では consent / restriction を人物だけに閉じません。  
 マルチモーダル系では、artifact 単位・space 単位・group 単位の制約も必要になります。
 
 対象例:
@@ -97,7 +97,7 @@ DOKP では consent / restriction を人物だけに閉じません。
 
 ### 3.3 Year-End Opt-Out Review
 
-DOKP の既定は、person-related experimental use を upfront opt-in ではなく **年度末 opt-out 確認** で判定することです。年度の進行中は restricted canonical capture を蓄積し、名寄せ・face / speaker resolution は filtering 精度向上のための内部補助としてのみ使います。review 完了前の data は experiment projection に入れてはなりません。
+LETHE の既定は、person-related experimental use を upfront opt-in ではなく **年度末 opt-out 確認** で判定することです。年度の進行中は restricted canonical capture を蓄積し、名寄せ・face / speaker resolution は filtering 精度向上のための内部補助としてのみ使います。review 完了前の data は experiment projection に入れてはなりません。
 
 ### 3.3.1 Opt-Out Strategies
 

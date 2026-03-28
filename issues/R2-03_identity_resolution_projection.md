@@ -20,7 +20,7 @@ MVP シナリオで名寄せ（Identity Resolution）が中核的な役割を果
 ### Projection 定義
 
 ```yaml
-apiVersion: "dokp/v1"
+apiVersion: "lethe/v1"
 kind: "Projection"
 metadata:
   id: "proj:person-resolution"

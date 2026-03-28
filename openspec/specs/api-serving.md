@@ -55,8 +55,8 @@ operational-latest で最新データ取得に失敗した場合:
 
 ```text
 1. projection cache から前回 build 結果を返却
-2. X-DOKP-Stale: true header 付与
-3. X-DOKP-Built-At: <timestamp> header 付与
+2. X-LETHE-Stale: true header 付与
+3. X-LETHE-Built-At: <timestamp> header 付与
 4. background で rebuild enqueue
 ```
 
@@ -84,11 +84,11 @@ operational-latest で最新データ取得に失敗した場合:
 
 | Header | Description |
 |---|---|
-| `X-DOKP-Projection-Id` | Projection ID |
-| `X-DOKP-Read-Mode` | 使用された read mode |
-| `X-DOKP-Stale` | stale data かどうか (true/false) |
-| `X-DOKP-Built-At` | 最新 build timestamp |
-| `X-DOKP-Lineage-Ref` | lineage 参照 |
+| `X-LETHE-Projection-Id` | Projection ID |
+| `X-LETHE-Read-Mode` | 使用された read mode |
+| `X-LETHE-Stale` | stale data かどうか (true/false) |
+| `X-LETHE-Built-At` | 最新 build timestamp |
+| `X-LETHE-Lineage-Ref` | lineage 参照 |
 
 ---
 
@@ -120,7 +120,7 @@ restricted flag が付いた field は Projection API 経由で公開する前�
 ### 6.1 Application Layout
 
 ```
-src/dokp/api/
+src/lethe/api/
 ├── main.py                       # FastAPI app, middleware registration
 ├── middleware/
 │   ├── auth.py                   # AuthenticationMiddleware
@@ -142,7 +142,7 @@ src/dokp/api/
 ```python
 from fastapi import FastAPI
 
-app = FastAPI(title="DOKP API", version="0.1.0")
+app = FastAPI(title="LETHE API", version="0.1.0")
 
 # middleware (outer → inner order)
 app.add_middleware(FilteringMiddleware)
@@ -218,7 +218,7 @@ Response:
 | 1 | Filtering-before-Exposure Law: restricted data は必ず filtering | middleware integration test |
 | 2 | 全レスポンスに projection_metadata 付与 | response schema test |
 | 3 | read mode は projection spec で宣言されたもののみ | validation |
-| 4 | stale fallback 時は X-DOKP-Stale: true | header check |
+| 4 | stale fallback 時は X-LETHE-Stale: true | header check |
 | 5 | pagination limit ≤ 100 | validation |
 
 ---
@@ -236,7 +236,7 @@ Response:
 | 7 | Projection not built | 503 + retry_after | |
 | 8 | restricted field in person | field masked | |
 | 9 | GET /api/health | status ok | |
-| 10 | Stale fallback triggered | X-DOKP-Stale: true | |
+| 10 | Stale fallback triggered | X-LETHE-Stale: true | |
 
 ---
 

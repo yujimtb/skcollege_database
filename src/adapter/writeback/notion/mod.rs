@@ -2,7 +2,7 @@
 //!
 //! Implements the `SaaSWriteAdapter` trait for Notion databases.
 //! Ported from the Google Apps Script `NotionService.js` in skcollege_dictionary,
-//! adapted to the DOKP write-back protocol.
+//! adapted to the LETHE write-back protocol.
 
 pub mod client;
 

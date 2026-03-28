@@ -11,7 +11,7 @@
 ## 1. Module Purpose
 
 Observation Lake / Supplemental / source-native / 他の Projection をソースとして、**派生データベース / API** を構築するエンジン。
-DOKP の利用面の中核。
+LETHE の利用面の中核。
 
 ---
 
@@ -83,7 +83,7 @@ sources:
 ## 5. Projection Spec Format
 
 ```yaml
-apiVersion: "dokp/v1"
+apiVersion: "lethe/v1"
 kind: "Projection"
 
 metadata:

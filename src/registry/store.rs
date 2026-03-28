@@ -366,7 +366,7 @@ mod tests {
             schemas: vec![SchemaRef::new("schema:slack-message")],
             authority_model: AuthorityModel::LakeAuthoritative,
             capture_model: CaptureModel::Event,
-            owner: "dokp".into(),
+            owner: "lethe".into(),
             trust_level: TrustLevel::Automated,
         };
         assert!(store.register_observer(obs).is_ok());

@@ -253,28 +253,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dokp"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "dotenvy",
- "hex",
- "jsonschema",
- "pretty_assertions",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tower",
- "uuid",
-]
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +802,28 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "lethe"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "dotenvy",
+ "hex",
+ "jsonschema",
+ "pretty_assertions",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tower",
+ "uuid",
+]
 
 [[package]]
 name = "libc"

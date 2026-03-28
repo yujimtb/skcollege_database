@@ -6,21 +6,21 @@
 use chrono::Utc;
 use serde_json::json;
 
-use dokp::api::envelope::ResponseEnvelope;
-use dokp::api::health::HealthResponse;
-use dokp::api::pagination::{paginate, PaginationParams};
-use dokp::api::read_mode::ReadModeResolver;
-use dokp::domain::*;
-use dokp::governance::filter::FilteringGate;
-use dokp::governance::types::{AccessScope, MaskStrategy, RestrictedFieldSpec};
-use dokp::identity::projector::IdentityProjector;
-use dokp::lake::store::LakeStore;
-use dokp::person_page::projector::PersonPageProjector;
-use dokp::projection::catalog::ProjectionCatalog;
-use dokp::projection::runner::Projector;
-use dokp::projection::spec::*;
-use dokp::projection::BuildStatus;
-use dokp::propagation::watermark::WatermarkStore;
+use lethe::api::envelope::ResponseEnvelope;
+use lethe::api::health::HealthResponse;
+use lethe::api::pagination::{paginate, PaginationParams};
+use lethe::api::read_mode::ReadModeResolver;
+use lethe::domain::*;
+use lethe::governance::filter::FilteringGate;
+use lethe::governance::types::{AccessScope, MaskStrategy, RestrictedFieldSpec};
+use lethe::identity::projector::IdentityProjector;
+use lethe::lake::store::LakeStore;
+use lethe::person_page::projector::PersonPageProjector;
+use lethe::projection::catalog::ProjectionCatalog;
+use lethe::projection::runner::Projector;
+use lethe::projection::spec::*;
+use lethe::projection::BuildStatus;
+use lethe::propagation::watermark::WatermarkStore;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -353,7 +353,7 @@ fn api_response_envelope_contract() {
     let identity = &projector.project(&obs)[0];
     let pp = PersonPageProjector::project(identity, &obs, &[]);
 
-    let metadata = dokp::api::envelope::ProjectionMetadata {
+    let metadata = lethe::api::envelope::ProjectionMetadata {
         projection_id: ProjectionRef::new("proj:person-page"),
         version: SemVer::new("1.0.0"),
         built_at: Utc::now(),
