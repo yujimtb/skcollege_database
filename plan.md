@@ -1,7 +1,7 @@
 
 ---
 
-# LETHE (Architecture Design Specification: Dormitory Observation & Knowledge Platform)
+# LETHE (旧称:DOKP; Architecture Design Specification: Dormitory Observation & Knowledge Platform)
 
 **Version:** 4.0
 **Date:** 2026-03-09
